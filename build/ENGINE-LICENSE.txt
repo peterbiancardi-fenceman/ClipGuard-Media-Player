@@ -1,0 +1,5 @@
+s3engine.dll, decklink_monitor.dll and filters\DeckLinkSource.ax are built from Unplugged's
+engine (https://github.com/spedagadi/unplugged-mpc-hc, built on MPC-HC), licensed under
+the GNU General Public License v3. Our changes are commits on our fork:
+https://github.com/peterbiancardi-fenceman/unplugged-mpc-hc (branch clipguard-media-player).
+The full licence text: https://www.gnu.org/licenses/gpl-3.0.txt

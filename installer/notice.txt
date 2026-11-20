@@ -1,0 +1,28 @@
+ClipGuard Media Player (beta)
+
+Please read before installing.
+
+VIDEO PROCESSOR AND COPY PROTECTION
+Video Processor needs an unencrypted HDMI signal. ClipGuard Media Player does not
+decrypt, remove or bypass HDCP or any other copy protection. It cannot record or
+save the video it shows; it only displays it. You are responsible for using it
+with sources and content you are permitted to use, and in line with the laws
+where you live and the terms of your devices and services.
+
+BETA
+This is a beta. Report problems as issues on
+https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player/issues
+
+PRIVACY
+No telemetry. Your Plex sign-in, settings and logs stay on this PC.
+
+NO WARRANTY
+ClipGuard Media Player is free software under the GNU General Public License,
+version 3 (LICENSE.txt in the install folder). It is provided as is, without
+warranty of any kind. The third-party components and their licences are listed
+in the licenses folder.
+
+TRADEMARKS
+Plex, Dolby, DTS, Blackmagic Design, DeckLink, PlayStation and the names of
+projectors are trademarks of their owners, named only to describe what the
+player works with. This software is not made, endorsed or supported by them.

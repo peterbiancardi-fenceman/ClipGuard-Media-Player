@@ -1,0 +1,43 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build ClipGuard Media Player
+        id: build
+        run: .\build\build.ps1
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: ClipGuard Media Player Setup
+          path: _bin/setup/*.exe
+          compression-level: 0
+
+      - name: Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = '${{ steps.build.outputs.version }}'
+          $exe = Get-ChildItem _bin/setup/*.exe | Select-Object -First 1
+          gh release create '${{ github.ref_name }}' $exe.FullName --prerelease --title "ClipGuard Media Player $v (beta)" --notes-file RELEASE-NOTES.md

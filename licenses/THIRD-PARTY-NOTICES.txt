@@ -1,0 +1,67 @@
+CLIPGUARD MEDIA PLAYER -- CREDITS AND THIRD-PARTY COMPONENTS
+
+ClipGuard Media Player is free software under the GNU General Public License,
+version 3 (LICENSE.txt). Source:
+  Player:   https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player
+  Engine:   https://github.com/peterbiancardi-fenceman/unplugged-mpc-hc
+            (branch clipguard-media-player)
+  Renderer: https://github.com/peterbiancardi-fenceman/unplugged-VideoRenderer
+            (branch clipguard-media-player)
+Each release is tagged in the player repository; its release notes name the engine
+and renderer commits it was built from.
+
+Built on Unplugged's open-source engine and renderer (github.com/spedagadi),
+based on MPC-HC and MPC Video Renderer.
+
+Bundled components, each under its own licence:
+
+  Unplugged engine (s3engine.dll), based on MPC-HC
+      GPL v3. Modified (our fork above). See ENGINE-LICENSE.txt.
+
+  Unplugged renderer (filters\unplugged_vr.ax), based on MPC Video Renderer
+      GPL v3, copyright the MPC Video Renderer contributors (Aleksoid1978 and
+      others). Modified by Unplugged and by us (our fork above).
+
+  Zion ML grade models (filters\xgb_*.plxgb)
+      Trained by the Unplugged developer; distributed with his permission under
+      the GPL v3.
+
+  YOLO segmentation models (filters\yolo26n-seg_op21.onnx, filters\yolo26n-sem.onnx)
+      Ultralytics YOLO, AGPL v3. Copyright Ultralytics.
+      https://github.com/ultralytics/ultralytics -- the AGPL v3 text is at
+      https://www.gnu.org/licenses/agpl-3.0.txt.
+
+  FSRCNNX upscaler (in the renderer)
+      LGPL v3. https://github.com/igv/FSRCNN-TensorFlow
+
+  ONNX Runtime (filters\onnxruntime.dll)
+      MIT licence. Copyright (c) Microsoft Corporation.
+
+  ByteTrack-Eigen (compiled into the renderer)
+      MIT licence. https://github.com/cj-mills/byte-track-eigen
+  Eigen (compiled into the renderer)
+      MPL 2.0. https://eigen.tuxfamily.org
+
+  LAV Filters (filters\LAVSplitter.ax, LAVVideo.ax, LAVAudio.ax and their FFmpeg
+  libraries)
+      GPL v2 or later (FFmpeg parts LGPL v2.1 or later). The official, unmodified
+      release by Hendrik Leppkes. Source: https://github.com/Nevcairiel/LAVFilters
+      (the release's tag) and https://ffmpeg.org.
+
+  MPC Audio Renderer (filters\MpcAudioRenderer.ax), from MPC-BE
+      GPL v3. The official, unmodified release.
+      Source: https://github.com/Aleksoid1978/MPC-BE
+
+  ArgyllCMS (spotread.exe, colprof.exe, collink.exe and its profiles)
+      AGPL v3, by Graeme Gill. Used unmodified for projector calibration.
+      See ArgyllCMS-LICENSE.txt and ArgyllCMS-SOURCE.txt.
+
+  Blackmagic Design DeckLink SDK derived code (decklink_monitor.dll,
+  filters\DeckLinkSource.ax)
+      See blackmagic_sdk_notice.txt and decklink_sdk_license.txt. The DeckLink
+      driver (Desktop Video) is installed by the user and is not included.
+
+Trademarks: Plex, Dolby, DTS, Blackmagic Design, DeckLink, PlayStation and the
+names of projectors are trademarks of their owners, named only to describe what
+the player works with. ClipGuard Media Player is not made, endorsed or supported
+by them.
