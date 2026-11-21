@@ -22,11 +22,15 @@ through a capture card, with the same picture processing.
 - **HDR to SDR tone mapping.** For projectors that look best with SDR, with picture
   settings organised in sections.
 - **Projector calibration.** It builds a 3D LUT for any projector with a supported
-  meter, with or without a colorimeter correction file.
+  meter, with or without a colorimeter correction file (any .ccss in the Calibration
+  folder). Black and white check screens come first, and colours the projector can't
+  reach keep its own most saturated colour instead of shifting hue.
 - **Video Processor.** It shows a capture card's HDMI input full screen, with
   ClipGuard and the picture settings applied. It needs an unencrypted HDMI signal (see
   below).
-- **Remote control.** It learns your remote's buttons (see [Remote control](#remote-control)).
+- **Remote control and mouse.** It learns your remote's buttons (see [Remote control](#remote-control)),
+  and works with a mouse (see [Mouse](#mouse)).
+- **Covers.** A gold resolution badge (4K, 1080p, 720p) and an HDR or HLG tag on each cover.
 - **Made for a home theater PC.** A Power tab (close or restart the player, shut down
   the HTPC), Start with Windows, five dark colour themes, soft menu sounds, and Sort /
   Show (unwatched only) for Movies and TV Shows.
@@ -73,6 +77,20 @@ Settings and logs are kept in `%LOCALAPPDATA%\ClipGuard`.
 
 On Movies and TV Shows, OK on the tab opens Sort by (title, date added, release year,
 running time) and Show (all, or unwatched only); each remembers its own choice.
+
+Settings > About shows the version and build, your PC (Windows, processor, memory,
+graphics card and driver, display mode) and the Plex server; OK copies it to the
+clipboard for an issue.
+
+## Mouse
+
+- Pointing at a tab, cover, row or button selects it; a click opens it (a setting with
+  a value steps to the next one).
+- Right-click is Back. The wheel moves up and down (Shift + wheel moves along a row of
+  covers).
+- While watching, moving the mouse shows the film's bar, a click is Play / Pause and a
+  right-click is Back.
+- The pointer hides after 3 seconds without moving.
 
 ## Remote control
 
@@ -121,8 +139,8 @@ look-ahead delays the picture by one frame (about 17 ms at 60 Hz).
 ## Reporting problems
 
 Open an [issue](../../issues) on this repository with what you did, what you expected, and what
-happened. Attach `crash.log` from `%LOCALAPPDATA%\ClipGuard\MediaPlayer` if there is
-one. Don't attach screenshots of copy-protected content.
+happened. Paste what Settings > About copies, and attach `crash.log` from
+`%LOCALAPPDATA%\ClipGuard\MediaPlayer` if there is one. Don't attach screenshots of copy-protected content.
 
 ## Privacy
 

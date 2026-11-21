@@ -23,6 +23,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using System.Globalization;
 using System.IO;
 using System.Net;
@@ -86,6 +87,7 @@ namespace ClipGuard
         public int VerIdx;
         public string Key = "", Title = "", Thumb = "", Art = "", Summary = "", Rating = "", File = "", PartKey = "", Res = "";
         public string Hdr = "", Audio = "", Edition = "";
+        public string Dovi = "", DvEl = "";   // 2.89.0: Dolby Vision profile ("7.6"), enhancement layer ("FEL" / "MEL", once played)
         public int Year;
         public long Duration, Offset, AddedAt;
         public int ViewCount;
@@ -427,6 +429,7 @@ namespace ClipGuard
             if (mv.Versions.Count == 0) return;
             Ver v = mv.Versions[mv.VerIdx];
             mv.Res = v.Res; mv.Hdr = v.Hdr; mv.Audio = v.Audio; mv.PartKey = v.PartKey; mv.File = v.File;
+            mv.Dovi = v.Dovi;
         }
 
         // 2.52.1: the format, e.g. "TrueHD Atmos 7.1" (displayTitle is often just the language).
@@ -478,6 +481,8 @@ namespace ClipGuard
             void SetNeuralUpscaler(int v);
             bool Ssr();                       // 2.85.0: SSimSuperRes
             void SetSsr(bool on);
+            int OutGamma();                   // 2.88.1: 0 = 2.2, 1 = 2.4, 2 = BT.1886
+            void SetOutGamma(int v);
             bool KscapeReady();               // 2.74.0: a Kaleidescape answers on the network
             int KscapeMode();                 // its play mode (2 = playing)
             void KscapeSend(string command);  // a control-protocol command (UP, SELECT, PLAY ...)
@@ -610,6 +615,7 @@ namespace ClipGuard
         // Playing
         Process player;
         Movie playing;
+        DateTime playStarted = DateTime.MinValue;   // 2.89.0
         bool lipSync;
         int lipDelta;
         long lastPos = -1, lastDur;
@@ -762,6 +768,7 @@ namespace ClipGuard
             Activate();
             Cursor.Hide();
             cursorHidden = true;
+            StartMouseTimer();   // 0.9.2: mouse
             // Video Processor stops while the library is up (and a film needs Unplugged closed first).
             Bg2(delegate { CloseUnplugged(); }, delegate { Start(); });
         }
@@ -868,7 +875,7 @@ namespace ClipGuard
             Dictionary<string, object> d = new Dictionary<string, object>();
             d["s"] = m.Srv.Id; d["k"] = m.Key; d["t"] = m.Title; d["th"] = m.Thumb; d["a"] = m.Art; d["su"] = m.Summary; d["r"] = m.Rating;
             d["y"] = m.Year; d["du"] = m.Duration; d["o"] = m.Offset; d["v"] = m.ViewCount; d["ad"] = m.AddedAt;
-            d["re"] = m.Res; d["h"] = m.Hdr; d["au"] = m.Audio;
+            d["re"] = m.Res; d["h"] = m.Hdr; d["au"] = m.Audio; d["dv"] = m.Dovi;
             d["ty"] = m.Type; d["st"] = m.ShowTitle; d["sk"] = m.ShowKey; d["pk"] = m.SeasonKey; d["sth"] = m.ShowThumb;
             d["sn"] = m.SeasonNum; d["en"] = m.EpNum; d["lc"] = m.LeafCount; d["vl"] = m.ViewedLeafCount;
             return d;
@@ -883,7 +890,7 @@ namespace ClipGuard
             m.Srv = sv; m.Key = Plex.Str(o, "k"); m.Title = Plex.Str(o, "t"); m.Thumb = Plex.Str(o, "th"); m.Art = Plex.Str(o, "a");
             m.Summary = Plex.Str(o, "su"); m.Rating = Plex.Str(o, "r"); m.Year = (int)Plex.Num(o, "y"); m.Duration = Plex.Num(o, "du");
             m.Offset = Plex.Num(o, "o"); m.ViewCount = (int)Plex.Num(o, "v"); m.AddedAt = Plex.Num(o, "ad");
-            m.Res = Plex.Str(o, "re"); m.Hdr = Plex.Str(o, "h"); m.Audio = Plex.Str(o, "au");
+            m.Res = Plex.Str(o, "re"); m.Hdr = Plex.Str(o, "h"); m.Audio = Plex.Str(o, "au"); m.Dovi = Plex.Str(o, "dv");
             string ty = Plex.Str(o, "ty"); if (ty.Length > 0) m.Type = ty;
             m.ShowTitle = Plex.Str(o, "st"); m.ShowKey = Plex.Str(o, "sk"); m.SeasonKey = Plex.Str(o, "pk"); m.ShowThumb = Plex.Str(o, "sth");
             m.SeasonNum = (int)Plex.Num(o, "sn"); m.EpNum = (int)Plex.Num(o, "en"); m.LeafCount = (int)Plex.Num(o, "lc"); m.ViewedLeafCount = (int)Plex.Num(o, "vl");
@@ -1163,6 +1170,7 @@ namespace ClipGuard
                 tv.Sort(delegate(Movie a, Movie b) { return string.Compare(SortTitle(a.Title ?? ""), SortTitle(b.Title ?? ""), StringComparison.OrdinalIgnoreCase); });
                 movies = all; recent = rec; shows = tv; recentTv = rtv;
                 SplitContinue(c);
+                HdrFill();   // 2.89.0: each film's HDR type for the cover tags
                 showIdx = Math.Min(showIdx, Math.Max(0, shows.Count - 1));
                 SaveLibraryCache();
                 if (quiet)
@@ -1426,6 +1434,7 @@ namespace ClipGuard
         {
 #if PLAYER
             if (calState != 0) return CalDlgKey(k);   // 2.66.0: the calibration dialog has the keyboard
+            if (aboutOn) return AboutKey(k);   // 2.89.1
             // 2.73.0: Esc is Back; the player closes only from the Power tab (Alt+F4 stays as a
             // keyboard-only way out).
             if (k == (Keys.Alt | Keys.F4)) { Quit(); return true; }
@@ -1597,6 +1606,7 @@ namespace ClipGuard
                 using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, r);
                 Txt(g, rows[i][0], 26, true, Color.White, 126, y + 18);
                 Txt(g, rows[i][1], 24, false, Grey, 720, y + 20);
+                { int ii = i; Hit(r, delegate { navFocus = false; pwrIdx = ii; }); }   // 0.9.2: mouse
                 if (!navFocus && i == pwrIdx) Focus(g, r);
             }
             if (pwrConfirm)
@@ -1736,6 +1746,7 @@ namespace ClipGuard
                 RectangleF r = new RectangleF(x + 16, ry, w - 32, rowH - 6);
                 if (cur) Txt(g, "\u25CF", 18, false, Yellow, r.X + 14, ry + 12);
                 Txt(g, name, 22, i == sortIdx, i == sortIdx ? Color.White : Color.FromArgb(220, 222, 226), r.X + 44, ry + 10);
+                { int ii = i; Hit(r, delegate { sortIdx = ii; }); }
                 if (i == sortIdx) Focus(g, r);
                 ry += rowH;
             }
@@ -1899,6 +1910,253 @@ namespace ClipGuard
         }
 #endif
 
+        // ---- 2.89.1: Settings > About: the version and build, this PC and its connections,
+        // read when it opens (the Plex server's version is asked for in the background).
+        bool aboutOn;
+        List<string[]> aboutRows = new List<string[]>();   // { heading } or { label, value }
+        string aboutStatus = "";
+
+        bool IsAboutRow()
+        {
+            string[] r = SettingsRows();
+            return setIdx >= 0 && setIdx < r.Length && r[setIdx].StartsWith("About\t", StringComparison.Ordinal);
+        }
+
+#if PLAYER
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        class MemStatus
+        {
+            public uint dwLength = (uint)Marshal.SizeOf(typeof(MemStatus));
+            public uint dwMemoryLoad;
+            public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile, ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+        }
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        static extern bool GlobalMemoryStatusEx([In, Out] MemStatus m);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetLogicalProcessorInformation(IntPtr buffer, ref uint length);
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+        struct DevMode
+        {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+            public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+            public int dmFields, dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+            public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+            public short dmLogPixels;
+            public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        }
+        [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+        static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DevMode devMode);
+
+        static int PhysicalCores()
+        {
+            try
+            {
+                uint len = 0;
+                GetLogicalProcessorInformation(IntPtr.Zero, ref len);
+                if (len == 0) return 0;
+                IntPtr buf = Marshal.AllocHGlobal((int)len);
+                try
+                {
+                    if (!GetLogicalProcessorInformation(buf, ref len)) return 0;
+                    int size = IntPtr.Size == 8 ? 32 : 24, n = 0;
+                    for (int off = 0; off + size <= len; off += size)
+                        if (Marshal.ReadInt32(buf, off + IntPtr.Size) == 0) n++;   // RelationProcessorCore
+                    return n;
+                }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+            catch (Exception) { return 0; }
+        }
+
+        static string RegStr(RegistryKey k, string name) { try { object v = k == null ? null : k.GetValue(name); return v == null ? "" : v.ToString(); } catch (Exception) { return ""; } }
+
+        static string WindowsText()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                {
+                    string name = RegStr(k, "ProductName"), disp = RegStr(k, "DisplayVersion"), build = RegStr(k, "CurrentBuild"), ubr = RegStr(k, "UBR");
+                    int b; if (int.TryParse(build, out b) && b >= 22000) name = name.Replace("Windows 10", "Windows 11");
+                    return (name + (disp.Length > 0 ? " " + disp : "") + "  (build " + build + (ubr.Length > 0 ? "." + ubr : "") + ")").Trim();
+                }
+            }
+            catch (Exception) { return Environment.OSVersion.VersionString; }
+        }
+
+        static List<string> GpuTexts()
+        {
+            List<string> l = new List<string>();
+            try
+            {
+                using (RegistryKey cls = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"))
+                    foreach (string sub in cls.GetSubKeyNames())
+                    {
+                        if (sub.Length != 4) continue;
+                        using (RegistryKey k = cls.OpenSubKey(sub))
+                        {
+                            string name = RegStr(k, "DriverDesc"), ver = RegStr(k, "DriverVersion");
+                            if (name.Length == 0 || name.IndexOf("Basic", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("Virtual", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("Remote", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                            string drv = ver;
+                            if (name.IndexOf("NVIDIA", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                // 32.0.15.6214 -> 562.14
+                                string digits = ver.Replace(".", "");
+                                if (digits.Length >= 5) { string d5 = digits.Substring(digits.Length - 5); drv = d5.Substring(0, 3) + "." + d5.Substring(3) + "  (" + ver + ")"; }
+                            }
+                            string mem = "";
+                            object q = null;
+                            try { q = k.GetValue("HardwareInformation.qwMemorySize"); } catch (Exception) { }
+                            if (q is long && (long)q > 0) mem = ", " + ((long)q / 1073741824.0).ToString("0", CultureInfo.InvariantCulture) + " GB";
+                            else if (q is byte[] && ((byte[])q).Length == 8) { long v = BitConverter.ToInt64((byte[])q, 0); if (v > 0) mem = ", " + (v / 1073741824.0).ToString("0", CultureInfo.InvariantCulture) + " GB"; }
+                            string t = name + mem + "  ·  driver " + drv;
+                            if (!l.Contains(t)) l.Add(t);
+                        }
+                    }
+            }
+            catch (Exception) { }
+            if (l.Count == 0) l.Add("not found");
+            return l;
+        }
+
+        static string FileVer(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return "not found";
+                FileVersionInfo v = FileVersionInfo.GetVersionInfo(path);
+                string s2 = (v.ProductVersion ?? v.FileVersion ?? "").Trim();
+                return (s2.Length > 0 ? s2 : "present") + "  (" + File.GetLastWriteTime(path).ToString("d MMM yyyy", CultureInfo.InvariantCulture) + ")";
+            }
+            catch (Exception) { return "?"; }
+        }
+
+        void AboutOpen()
+        {
+            List<string[]> r = new List<string[]>();
+            r.Add(new[] { "CLIPGUARD MEDIA PLAYER" });
+#if STANDALONE
+            string ver = PlayerProgram.MediaPlayerVersion;
+#else
+            string ver = "?";
+#endif
+            ver += "  public beta";
+            r.Add(new[] { "Version", ver });
+            string bf = Path.Combine(PlayerDir, "installed_build.txt");
+            string build = "not recorded";
+            try { if (File.Exists(bf)) build = "run " + File.ReadAllText(bf).Trim() + ", installed " + File.GetLastWriteTime(bf).ToString("d MMM yyyy HH:mm", CultureInfo.InvariantCulture); } catch (Exception) { }
+            r.Add(new[] { "Build", build });
+            r.Add(new[] { "Installed in", PlayerDir });
+            string filters = Path.Combine(PlayerDir, "filters");
+            r.Add(new[] { "Renderer", FileVer(Path.Combine(filters, "unplugged_vr.ax")) });
+            r.Add(new[] { "Engine", FileVer(Path.Combine(PlayerDir, "s3engine.dll")) });
+            r.Add(new[] { "LAV Filters", FileVer(Path.Combine(filters, "LAVVideo.ax")) });
+            r.Add(new[] { "ArgyllCMS", File.Exists(Path.Combine(PlayerDir, "spotread.exe")) ? "included  (" + File.GetLastWriteTime(Path.Combine(PlayerDir, "spotread.exe")).ToString("d MMM yyyy", CultureInfo.InvariantCulture) + ")" : "not found" });
+
+            r.Add(new[] { "THIS PC" });
+            r.Add(new[] { "Computer", Environment.MachineName });
+            r.Add(new[] { "Windows", WindowsText() });
+            string cpu = "";
+            try { using (RegistryKey k = Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\CentralProcessor\0")) cpu = RegStr(k, "ProcessorNameString").Trim(); } catch (Exception) { }
+            int cores = PhysicalCores();
+            r.Add(new[] { "Processor", (cpu.Length > 0 ? cpu : "?") + "  ·  " + (cores > 0 ? cores + " cores / " : "") + Environment.ProcessorCount + " threads" });
+            MemStatus ms = new MemStatus();
+            string ram = "?";
+            try { if (GlobalMemoryStatusEx(ms)) ram = (ms.ullTotalPhys / 1073741824.0).ToString("0", CultureInfo.InvariantCulture) + " GB  (" + ms.dwMemoryLoad + "% in use)"; } catch (Exception) { }
+            r.Add(new[] { "Memory", ram });
+            List<string> gpus = GpuTexts();
+            for (int i = 0; i < gpus.Count; i++) r.Add(new[] { i == 0 ? "Graphics" : "", gpus[i] });
+            try
+            {
+                Screen sc = Screen.FromControl(this);
+                DevMode dm = new DevMode(); dm.dmSize = (short)Marshal.SizeOf(typeof(DevMode));
+                string mode = sc.Bounds.Width + " x " + sc.Bounds.Height;
+                if (EnumDisplaySettings(sc.DeviceName, -1, ref dm)) mode = dm.dmPelsWidth + " x " + dm.dmPelsHeight + " at " + dm.dmDisplayFrequency + " Hz";
+                r.Add(new[] { "Display", mode + "  (" + sc.DeviceName.Replace(@"\\.\", "") + (sc.Primary ? ", main" : "") + ")" });
+            }
+            catch (Exception) { }
+
+            r.Add(new[] { "CONNECTIONS" });
+            int pi = r.Count;
+            r.Add(new[] { "Plex server", servers.Count == 0 ? "none found" : "asking..." });
+            aboutRows = r;
+            aboutStatus = "";
+            aboutOn = true;
+            Invalidate();
+            if (servers.Count > 0)
+            {
+                List<Server> ss = new List<Server>(servers);
+                List<string> got = new List<string>();
+                Bg2(delegate
+                {
+                    foreach (Server sv in ss)
+                    {
+                        string v = "";
+                        try { v = Plex.Str(Plex.Get(Plex.Json(Plex.Http("GET", Url(sv, "/identity"), sv.Token, 5000)), "MediaContainer"), "version"); } catch (Exception) { v = "not answering"; }
+                        got.Add(sv.Name + "  ·  " + (v.Length > 0 ? "Plex Media Server " + v : "?") + (sv.Owned ? "" : "  (shared with you)"));
+                    }
+                }, delegate
+                {
+                    if (!aboutOn || aboutRows != r) return;
+                    r[pi] = new[] { "Plex server", got.Count > 0 ? got[0] : "?" };
+                    for (int i = 1; i < got.Count; i++) r.Insert(pi + i, new[] { "", got[i] });
+                    Invalidate();
+                });
+            }
+        }
+
+        string AboutText()
+        {
+            StringBuilder b = new StringBuilder();
+            foreach (string[] a in aboutRows)
+            {
+                if (a.Length == 1) { if (b.Length > 0) b.Append("\r\n"); b.Append(a[0]).Append("\r\n"); }
+                else b.Append(a[0].Length > 0 ? a[0] + ": " : "    ").Append(a[1]).Append("\r\n");
+            }
+            return b.ToString();
+        }
+
+        bool AboutKey(Keys k)
+        {
+            if (k == Keys.Enter || k == Keys.C || k == Keys.Right)
+            {
+                try { Clipboard.SetText(AboutText()); aboutStatus = "Copied to the clipboard."; } catch (Exception) { aboutStatus = "Couldn't copy to the clipboard."; }
+            }
+            else if (k == Keys.Escape || k == Keys.Back || k == Keys.BrowserBack || k == Keys.Left) aboutOn = false;
+            Invalidate();
+            return true;
+        }
+
+        void DrawAbout(Graphics g)
+        {
+            RectangleF r = new RectangleF(200, 90, 1520, 900);
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(250, 30, 32, 38))) g.FillRectangle(b, r);
+            using (SolidBrush y = new SolidBrush(Yellow)) g.FillRectangle(y, r.X, r.Y, r.Width, 5);
+            Txt(g, "About", 30, true, Color.White, r.X + 40, r.Y + 26);
+            float yy = r.Y + 88;
+            foreach (string[] a in aboutRows)
+            {
+                if (yy > r.Bottom - 90) break;
+                if (a.Length == 1)
+                {
+                    yy += 8;
+                    Txt(g, a[0], 18, true, Yellow, r.X + 40, yy);
+                    yy += 32;
+                    continue;
+                }
+                Txt(g, a[0], 20, false, Grey, r.X + 40, yy);
+                TextBox(g, a[1], 20, false, Color.White, new RectangleF(r.X + 300, yy, r.Width - 340, 30));
+                yy += 31;
+            }
+            Txt(g, "OK: copy to the clipboard (for a GitHub issue)      Back: close" + (aboutStatus.Length > 0 ? "      " + aboutStatus : ""), 20, false, Grey, r.X + 40, r.Bottom - 48);
+        }
+#else
+        void AboutOpen() { }
+        bool AboutKey(Keys k) { aboutOn = false; return true; }
+        void DrawAbout(Graphics g) { }
+#endif
+
         string[] SettingsRows()
         {
             int fr = host.LookAheadFrames();
@@ -1925,6 +2183,7 @@ namespace ClipGuard
                 "Start with Windows\t" + (StartWithWindows() ? "On" : "Off") + "   (opens the player when you sign in to Windows; Left / Right)",
                 "Theme\t" + ThemeNames[themeIdx] + "   (Left / Right)",
                 "Menu sounds\t" + new[] { "Off", "Soft", "Normal" }[MenuSoundLevel()] + "   (Left / Right)"
+                , "About\tVersion, build and this PC   (Enter)"   // 2.89.1
                 };
 #else
                 "Back to Video Processor\tPress Enter   (F4)" };
@@ -2072,6 +2331,7 @@ namespace ClipGuard
             int n = SettingsRows().Length;
             if (k == Keys.Up) { if (setIdx == 0) navFocus = true; else setIdx--; }
             else if (k == Keys.Down) setIdx = Math.Min(n - 1, setIdx + 1);
+            else if (k == Keys.Enter && IsAboutRow()) AboutOpen();   // 2.89.1
             else if ((k == Keys.Left || k == Keys.Right) && SetRow() == 0)
             {
                 unpluggedDelay = ClampDelay(unpluggedDelay + (k == Keys.Right ? 5 : -5));
@@ -2409,6 +2669,7 @@ namespace ClipGuard
             {
                 player = p;
                 playing = m;
+            playStarted = DateTime.Now;   // 2.89.0
                 lipSync = lip;
                 lastPos = startMs > 0 ? startMs : -1;
                 lastDur = m != null ? m.Duration : 0;
@@ -3455,6 +3716,7 @@ namespace ClipGuard
                 if (key == "!startin") SetIni("StartIn", Ini("StartIn", "Library") == "VideoProcessor" ? "Library" : "VideoProcessor");
                 else if (key == "!frm") SetIni("MatchFrameRate", FrmOn() ? "0" : "1");
                 else if (key == "!ssr") { if (PHost != null) PHost.SetSsr(!PHost.Ssr()); }   // 2.85.0
+                else if (key == "!gamma") { if (PHost != null) PHost.SetOutGamma((PHost.OutGamma() + (dir < 0 ? 2 : 1)) % 3); }   // 2.88.1
                 else if (key == "!calrun") { if (k == Keys.Enter) CalBegin(); }
                 else if (key == "!lut") LutStep(dir);
                 else if (key == "!caldir") { }
@@ -3486,6 +3748,7 @@ namespace ClipGuard
             if (key == "!startin") return Ini("StartIn", "Library") == "VideoProcessor" ? "Video Processor" : "Library";
             if (key == "!frm") return FrmOn() ? "On" : "Off";
             if (key == "!ssr") return PHost != null && PHost.Ssr() ? "On" : "Off";   // 2.85.0
+            if (key == "!gamma") return PHost == null ? "2.2" : new[] { "2.2", "2.4", "BT.1886" }[Math.Max(0, Math.Min(2, PHost.OutGamma()))];   // 2.88.1
             if (key == "!copy") return "Press Enter";
             if (key == "!calrun") return "Press Enter";
             if (key == "!lut") return LutName(UnpluggedSettings.LutFile());
@@ -3508,6 +3771,7 @@ namespace ClipGuard
                     using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, rr);
                     Txt(g, UnpluggedSettings.Sections[secs[i]], 22, true, Color.White, 126, y + 11);
                     Txt(g, UnpluggedSettings.SectionHelpOf(secs[i]), 20, false, i == picIdx ? Color.White : Grey, 640, y + 13);
+                    { int ii = i; Hit(rr, delegate { navFocus = false; picIdx = ii; }); }
                     if (!navFocus && i == picIdx) Focus(g, rr);
                 }
                 TextBox(g, "Enter opens a section; Back returns here. Changes are used when a film or Video Processor next starts.", 20, false, Grey, new RectangleF(96, 924, 1728, 90));
@@ -3531,6 +3795,7 @@ namespace ClipGuard
                 using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, rr);
                 Txt(g, p.Label, 22, true, Color.White, 126, y + 11);
                 Txt(g, val, 22, false, i == picIdx ? Color.White : Grey, 820, y + 11);
+                { int ii = i; Hit(rr, delegate { navFocus = false; picIdx = ii; }); }
                 if (!navFocus && i == picIdx) Focus(g, rr);
             }
             string help = picIdx < rows.Count ? UnpluggedSettings.PRows[rows[picIdx]].Help : "";
@@ -3686,10 +3951,28 @@ namespace ClipGuard
         static string PlayerDir { get { return AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\'); } }
         int calState;            // 0 none, 1 typing the projector's name, 2 choosing the correction
         string calName = "";
-        int calCorr;             // 0 = <name>.ccss, 1 = none
         bool calRunning;
+        // 2.88.1: the correction is any .ccss in the Calibration folder, or none ("" last).
+        List<string> calCcss = new List<string>();
+        int calCcssIdx;
 
-        string CalCcssPath() { return Path.Combine(CalDir, SafeName(calName) + ".ccss"); }
+        void CalLoadCcss()
+        {
+            calCcss = new List<string>();
+            try
+            {
+                foreach (string f in Directory.GetFiles(CalDir, "*.ccss")) calCcss.Add(Path.GetFileName(f));
+                calCcss.Sort(StringComparer.OrdinalIgnoreCase);
+            }
+            catch (Exception) { }
+            calCcss.Add("");   // none
+            // the one named after the projector first, else the first file
+            string mine = SafeName(calName) + ".ccss";
+            int i = calCcss.FindIndex(n => string.Equals(n, mine, StringComparison.OrdinalIgnoreCase));
+            calCcssIdx = i >= 0 ? i : 0;
+        }
+
+        string CalCcssChoice() { return calCcssIdx < calCcss.Count && calCcss[calCcssIdx].Length > 0 ? Path.Combine(CalDir, calCcss[calCcssIdx]) : ""; }
 
         static string SafeName(string n)
         {
@@ -3732,7 +4015,7 @@ namespace ClipGuard
                 {
                     if (SafeName(calName).Length == 0) return true;
                     calState = 2;
-                    calCorr = File.Exists(CalCcssPath()) ? 0 : 1;
+                    CalLoadCcss();
                 }
                 else
                 {
@@ -3742,11 +4025,14 @@ namespace ClipGuard
             }
             else if (calState == 2)
             {
-                if (c == Keys.Left || c == Keys.Right || c == Keys.Up || c == Keys.Down) calCorr = 1 - calCorr;
+                int n = Math.Max(1, calCcss.Count);
+                if (c == Keys.Right || c == Keys.Down) calCcssIdx = (calCcssIdx + 1) % n;
+                else if (c == Keys.Left || c == Keys.Up) calCcssIdx = (calCcssIdx + n - 1) % n;
                 else if (c == Keys.Back) calState = 1;
                 else if (c == Keys.Enter)
                 {
-                    if (calCorr == 0 && !File.Exists(CalCcssPath())) return true;   // the file has to be there
+                    string f = CalCcssChoice();
+                    if (f.Length > 0 && !File.Exists(f)) { CalLoadCcss(); Invalidate(); return true; }   // gone meanwhile
                     CalLaunch();
                 }
             }
@@ -3760,7 +4046,8 @@ namespace ClipGuard
             calState = 0;
             if (!File.Exists(exe)) { message = "The calibration program (ClipGuardMeter.exe) is not in the Player folder."; Invalidate(); return; }
             if (!File.Exists(Path.Combine(PlayerDir, "spotread.exe"))) { message = "ArgyllCMS (spotread.exe) is not in the Player folder, so the calibration can't run."; Invalidate(); return; }
-            string args = "--cal \"" + calName.Replace("\"", "") + "\" --ccss \"" + (calCorr == 0 ? CalCcssPath() : "none")
+            string ccssArg = CalCcssChoice();
+            string args = "--cal \"" + calName.Replace("\"", "") + "\" --ccss \"" + (ccssArg.Length > 0 ? ccssArg : "none")
                 + "\" --out \"" + CalDir + "\" --argyll \"" + PlayerDir + "\" --screen \"" + UnpluggedScreen().DeviceName + "\"";
             Process p;
             try { p = Process.Start(new ProcessStartInfo(exe, args) { UseShellExecute = false, WorkingDirectory = PlayerDir }); }
@@ -3799,21 +4086,21 @@ namespace ClipGuard
             }
             else
             {
-                string ccss = SafeName(calName) + ".ccss";
-                bool have = File.Exists(CalCcssPath());
                 Txt(g, "Projector:  " + calName, 26, true, Color.White, r.X + 40, r.Y + 95);
-                Txt(g, "Correction (Left / Right):", 24, false, Grey, r.X + 40, r.Y + 150);
-                string[] opts = { ccss + (have ? "" : "   (not found)"), "None (the meter's standard reading)" };
-                for (int i = 0; i < 2; i++)
-                {
-                    RectangleF o = new RectangleF(r.X + 40, r.Y + 195 + i * 62, r.Width - 80, 54);
-                    using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, o);
-                    Txt(g, opts[i], 24, i == calCorr, i == calCorr ? Color.White : Grey, o.X + 20, o.Y + 12);
-                    if (i == calCorr) Focus(g, o);
-                }
-                string note = calCorr == 0
-                    ? (have ? "Enter starts the calibration on the projector." : "Put " + ccss + " in " + CalDir + ", or choose None.")
-                    : "No .ccss: accuracy depends on how well the meter matches this projector's light. Enter starts.";
+                int nFiles = calCcss.Count - 1;
+                Txt(g, nFiles > 0 ? "Correction (Left / Right: " + nFiles.ToString(CultureInfo.InvariantCulture) + (nFiles == 1 ? " file" : " files") + " in the folder, or none):"
+                    : "Correction: no .ccss files in the folder", 24, false, Grey, r.X + 40, r.Y + 150);
+                string cur = calCcssIdx < calCcss.Count ? calCcss[calCcssIdx] : "";
+                RectangleF o = new RectangleF(r.X + 40, r.Y + 195, r.Width - 80, 64);
+                using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, o);
+                Txt(g, "<", 28, true, Grey, o.X + 18, o.Y + 12);
+                Txt(g, cur.Length > 0 ? cur : "None (the meter's standard reading)", 26, true, Color.White, o.X + 56, o.Y + 12);
+                Txt(g, ">", 28, true, Grey, o.Right - 40, o.Y + 12);
+                Focus(g, o);
+                Txt(g, (calCcssIdx + 1).ToString(CultureInfo.InvariantCulture) + " of " + calCcss.Count.ToString(CultureInfo.InvariantCulture), 20, false, Grey, o.X, o.Bottom + 10);
+                string note = cur.Length > 0
+                    ? "Enter starts the calibration with " + cur + ". More: put .ccss files in " + CalDir + "."
+                    : "No .ccss: accuracy depends on how well the meter matches this projector's light. Enter starts. (.ccss files go in " + CalDir + ".)";
                 TextBox(g, note + "   Backspace: name.   Esc cancels.", 20, false, Grey, new RectangleF(r.X + 40, r.Bottom - 70, r.Width - 80, 60));
             }
         }
@@ -3904,6 +4191,7 @@ namespace ClipGuard
                 using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, rr);
                 Txt(g, h.TabRowName(i), 22, true, Color.White, 126, y + 11);
                 Txt(g, h.TabRowValue(i), 22, false, i == cgIdx ? Color.White : Grey, 820, y + 11);
+                { int ii = i; Hit(rr, delegate { navFocus = false; cgIdx = ii; }); }
                 if (!navFocus && i == cgIdx) Focus(g, rr);
             }
             string help = cgIdx < CgHelp.Length ? CgHelp[cgIdx] : "";
@@ -4045,6 +4333,7 @@ namespace ClipGuard
                     bool cur = i == seasonIdx;
                     using (SolidBrush b = new SolidBrush(cur ? Color.White : Grey)) g.DrawString(name, f, b, sx, 196);
                     if (cur) using (SolidBrush y = new SolidBrush(Yellow)) g.FillRectangle(y, sx + 4, 234, sz.Width - 8, 4);
+                    { int ii = i; Hit(new RectangleF(sx - 4, 194, sz.Width + 8, 40), delegate { onSeasons = true; for (int n = 0; n < 64 && seasonIdx != ii; n++) ShowKey(ii > seasonIdx ? Keys.Right : Keys.Left, false); }); }
                     if (cur && onSeasons) Focus(g, new RectangleF(sx - 4, 194, sz.Width + 8, 40));
                     sx += sz.Width + 36;
                 }
@@ -4070,6 +4359,7 @@ namespace ClipGuard
                     using (SolidBrush b = new SolidBrush(Dim)) g.FillRectangle(b, x + 96, y + rowH - 8, 900, 4);
                     using (SolidBrush b = new SolidBrush(Yellow)) g.FillRectangle(b, x + 96, y + rowH - 8, 900 * Math.Min(1f, (float)e.Offset / e.Duration), 4);
                 }
+                { int ii = i; Hit(rr, delegate { onSeasons = false; epIdx = ii; }); }
                 if (!onSeasons && i == epIdx) Focus(g, rr);
             }
             if (!onSeasons && epIdx < episodes.Count)
@@ -4143,6 +4433,7 @@ namespace ClipGuard
         {
             XmcSwitch(false);   // 2.75.0: films play through the Media Player input
             playing = m;
+            playStarted = DateTime.Now;   // 2.89.0
             lipSync = lip;
             lipDelta = 0;
             lastPos = -1;
@@ -5474,10 +5765,11 @@ namespace ClipGuard
                 new PRow(S_NLS, "geo.nlsCropY", "Post NLS Y-Crop", null, 1, " %", "Crop after the stretch, up and down."),
                 new PRow(S_NLS, "geo.nlsFillMode", "Fill mode", new[] { "Auto", "Stretch", "Crop", "Off" }, 0, "", "What to do when the picture must be fitted."),
                 new PRow(S_NLS, "geo.nlsLock", "Lock band", null, 0, "", "Keeps the detected black band from moving."),
-                new PRow(S_LUT, "!calrun", "Calibrate a projector...", null, 0, "", "Measures the projector with the meter and builds a 3D LUT around your white, with a check and a PDF report. Enter starts: the projector's name, then its .ccss correction or none."),
+                new PRow(S_LUT, "!calrun", "Calibrate a projector...", null, 0, "", "Measures the projector with the meter and builds a 3D LUT around your white, with a check and a PDF report. Enter starts: the projector's name, then a .ccss correction from the Calibration folder, or none."),
                 new PRow(S_LUT, "!lut", "LUT", null, 0, "", "The calibration LUT the picture uses: None, or a projector you calibrated. F5 while watching turns it off and on for comparing."),
                 new PRow(S_LUT, "out.cubeLutMode", "LUT mode", new[] { "Off", "Gamma only", "Greyscale", "Full 3D" }, 0, "", "How the calibration LUT is applied (Full 3D for a calibration)."),
-                new PRow(S_LUT, "!caldir", "Calibration folder", null, 0, "", "Put a projector's .ccss here, named after the projector (for example Epson LS12000.ccss). The LUTs and reports are saved here too."),
+                new PRow(S_LUT, "!caldir", "Calibration folder", null, 0, "", "Put .ccss corrections here (any name; the calibration lets you pick one). The LUTs and reports are saved here too."),
+                new PRow(S_OUT, "!gamma", "Output gamma", null, 0, "", "Set it to your projector's gamma. 2.2 is Unplugged's own; 2.4 and BT.1886 re-encode the picture at the very end. With a calibration LUT on, the LUT sets the gamma and this is not used."),
                 new PRow(S_OUT, "!frm", "Match frame rate", null, 0, "", "Switches the graphics card's refresh rate to the film's or the capture source's (23.976, 24, 50, 59.94, 60) and back in the library."),
                 new PRow(S_OUT, "out.interpolate50", "Interpolate at 50%", null, 0, "", "Frame interpolation at 50 %."),
                 new PRow(S_OUT, "out.swapEffect", "Swap effect", new[] { "Discard", "Flip" }, 0, "", "How frames are handed to Windows."),
@@ -5971,6 +6263,7 @@ namespace ClipGuard
             try { if (backdrop != null) { backdrop.Close(); backdrop = null; } } catch (Exception) { }
 #endif
             if (cursorHidden) { Cursor.Show(); cursorHidden = false; }
+            if (mouseTimer != null) mouseTimer.Stop();
             lock (imgLock) Monitor.PulseAll(imgLock);
             playTimer.Stop();
             if (pinTimer != null) pinTimer.Stop();
@@ -5983,6 +6276,140 @@ namespace ClipGuard
             lock (imgLock) { foreach (Image im in imgs.Values) im.Dispose(); imgs.Clear(); }
             base.OnFormClosed(e);
             host.MediaClosed();
+        }
+
+        // ---- 0.9.2: mouse. Whatever is drawn as a choice registers where it is (Hit); the
+        // pointer selects it, a click selects and opens it (OK), right-click is Back, the wheel
+        // is Up / Down. Dialogs and menus still take their keys (a click there is OK).
+        sealed class HitZone { public RectangleF R; public Action Select; }
+        readonly List<HitZone> hits = new List<HitZone>();
+        Point lastMouse = new Point(-1, -1);
+        DateTime mouseQuietUntil = DateTime.MinValue;
+
+        void Hit(RectangleF r, Action select)
+        {
+            if (DialogOpen()) return;   // a dialog over the page has the mouse
+            hits.Add(new HitZone { R = r, Select = select });
+        }
+
+        bool DialogOpen()
+        {
+#if PLAYER
+            if (calState != 0 || aboutOn) return true;
+#endif
+            return learning;
+        }
+
+        PointF ToLayout(Point p)
+        {
+            float sx = ClientSize.Width / 1920f, sy = ClientSize.Height / 1080f, sc = Math.Min(sx, sy);
+            return new PointF((p.X - (ClientSize.Width - 1920 * sc) / 2) / sc, (p.Y - (ClientSize.Height - 1080 * sc) / 2) / sc);
+        }
+
+        HitZone HitAt(Point p)
+        {
+            PointF q = ToLayout(p);
+            for (int i = hits.Count - 1; i >= 0; i--) if (hits[i].R.Contains(q)) return hits[i];
+            return null;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (Math.Abs(e.X - lastMouse.X) + Math.Abs(e.Y - lastMouse.Y) < 3) return;   // only a real move selects
+            lastMouse = e.Location;
+            if (DateTime.Now < mouseQuietUntil) return;
+            HitZone z = HitAt(e.Location);
+            if (z != null) { z.Select(); Invalidate(); }
+        }
+
+        protected override void OnMouseClick(MouseEventArgs e)
+        {
+            base.OnMouseClick(e);
+            if (e.Button == MouseButtons.Right) { OnKey(Keys.Escape); Invalidate(); return; }
+            if (e.Button != MouseButtons.Left) return;
+            if (DialogOpen() || sortOpen) { OnKey(Keys.Enter); Invalidate(); return; }
+            HitZone z = HitAt(e.Location);
+            if (z == null) return;
+            z.Select();
+            // a settings row with a value: a click steps it, like Right; everything else opens
+            Keys k = Keys.Enter;
+            if (scr == Screen2.Settings && !navFocus)
+            {
+                string[] rows = SettingsRows();
+                if (setIdx >= 0 && setIdx < rows.Length && rows[setIdx].Contains("Left / Right")) k = Keys.Right;
+            }
+            mouseQuietUntil = DateTime.Now.AddMilliseconds(400);   // what opens can sit under the pointer
+            OnKey(k);
+            Invalidate();
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            int n = Math.Max(1, Math.Abs(e.Delta) / 120);
+            Keys k = e.Delta > 0 ? Keys.Up : Keys.Down;
+            // a row of posters scrolls sideways
+            if ((scr == Screen2.Home) && !navFocus && (ModifierKeys & Keys.Shift) != 0) k = e.Delta > 0 ? Keys.Left : Keys.Right;
+            for (int i = 0; i < n; i++) OnKey(k);
+            mouseQuietUntil = DateTime.Now.AddMilliseconds(300);
+            Invalidate();
+        }
+
+        // The pointer shows while the mouse moves and hides after 3 s still. During a film
+        // (whose picture belongs to the engine's window) the mouse is read here: a move shows
+        // the playback bar, a left click is Play / Pause, a right click is Back.
+        [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
+        System.Windows.Forms.Timer mouseTimer;
+        Point mousePos = new Point(int.MinValue, 0);
+        DateTime mouseMoved = DateTime.MinValue;
+        bool mouseL, mouseR;
+
+        void StartMouseTimer()
+        {
+            if (mouseTimer != null) return;
+            mouseTimer = new System.Windows.Forms.Timer();
+            mouseTimer.Interval = 60;
+            mouseTimer.Tick += delegate { MouseTick(); };
+            mouseTimer.Start();
+        }
+
+        static bool OursInFront()
+        {
+            try
+            {
+                uint pid;
+                GetWindowThreadProcessId(GetForegroundWindow(), out pid);
+                return pid == (uint)Process.GetCurrentProcess().Id;
+            }
+            catch (Exception) { return false; }
+        }
+
+        void MouseTick()
+        {
+            if (closing) return;
+            bool front = OursInFront();
+            Point p = Cursor.Position;
+            bool moved = mousePos.X != int.MinValue && (Math.Abs(p.X - mousePos.X) + Math.Abs(p.Y - mousePos.Y) >= 3);
+            mousePos = p;
+            if (moved && front)
+            {
+                mouseMoved = DateTime.Now;
+                if (cursorHidden) { Cursor.Show(); cursorHidden = false; }
+#if PLAYER
+                if (playing != null && player != null && !capturing) ShowBar(3000);
+#endif
+            }
+            else if (!cursorHidden && (DateTime.Now - mouseMoved).TotalSeconds > 3) { Cursor.Hide(); cursorHidden = true; }
+#if PLAYER
+            bool l = (GetAsyncKeyState(0x01) & 0x8000) != 0, r = (GetAsyncKeyState(0x02) & 0x8000) != 0;
+            if (front && playing != null && player != null && !capturing)
+            {
+                if (l && !mouseL) PlayerKey(menuOpen ? Keys.Enter : Keys.MediaPlayPause, false, false);
+                if (r && !mouseR) PlayerKey(Keys.Escape, false, false);
+            }
+            mouseL = l; mouseR = r;
+#endif
         }
 
         // ---- drawing (a 1920 x 1080 layout, scaled to the screen) -------------------------------
@@ -5998,6 +6425,7 @@ namespace ClipGuard
             float sx = ClientSize.Width / 1920f, sy = ClientSize.Height / 1080f, sc = Math.Min(sx, sy);
             g.TranslateTransform((ClientSize.Width - 1920 * sc) / 2, (ClientSize.Height - 1080 * sc) / 2);
             g.ScaleTransform(sc, sc);
+            hits.Clear();   // 0.9.2: the mouse targets, as drawn
             try
             {
                 switch (scr)
@@ -6027,6 +6455,7 @@ namespace ClipGuard
                 if (learning) DrawLearn(g);
 #if PLAYER
                 if (calState != 0) DrawCalDlg(g);
+                if (aboutOn) DrawAbout(g);   // 2.89.1
                 DrawVolume(g, 1920);   // 2.81.0: our volume card
 #endif
             }
@@ -6078,6 +6507,7 @@ namespace ClipGuard
                     SizeF sz = g.MeasureString(tabs[i], f);
                     using (SolidBrush b = new SolidBrush(i == tab ? Color.White : Grey)) g.DrawString(tabs[i], f, b, x, 44);
                     if (i == tab) using (SolidBrush y = new SolidBrush(Yellow)) g.FillRectangle(y, x + 4, 84, sz.Width - 8, 4);
+                    { int ii = i; Hit(new RectangleF(x - 4, 44, sz.Width + 8, 40), delegate { navFocus = true; if (tab != ii) { tab = ii; scr = TabScreen(tab); } }); }
                     if (navFocus && i == tab) Focus(g, new RectangleF(x - 4, 44, sz.Width + 8, 40));
                     x += sz.Width + 40;
                 }
@@ -6099,7 +6529,267 @@ namespace ClipGuard
                 using (SolidBrush b = new SolidBrush(Dim)) g.FillRectangle(b, x, y + h - 6, w, 6);
                 using (SolidBrush b = new SolidBrush(Yellow)) g.FillRectangle(b, x, y + h - 6, w * Math.Min(1f, (float)m.Offset / m.Duration), 6);
             }
+            if (w < 330) { float yb = ResBadge(g, m.Res, x + w - 7, y + 7); HdrTag(g, m, x + w - 7, yb + 4); }   // 2.88.0; 2.89.0: and the HDR tag
             if (sel) Focus(g, r);
+        }
+
+        // 2.88.0: the film's resolution on its cover: a small chrome-rimmed plate in the top
+        // right, silver lettering over a light bar in the resolution's colour (4K red, 1080p
+        // blue, 720p and below yellow).
+        static readonly string BadgeFamily = PickBadgeFamily();
+        static string PickBadgeFamily()
+        {
+            try
+            {
+                foreach (FontFamily f in FontFamily.Families)
+                    if (f.Name == "Bahnschrift SemiBold Condensed") return f.Name;
+                foreach (FontFamily f in FontFamily.Families)
+                    if (f.Name == "Bahnschrift") return f.Name;
+            }
+            catch (Exception) { }
+            return "Segoe UI";
+        }
+
+        static GraphicsPath RoundRect(RectangleF r, float rad)
+        {
+            GraphicsPath p = new GraphicsPath();
+            float d = rad * 2;
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        // ---- 2.89.0: HDR tags on the covers. Plex's library lists have no stream details, so
+        // the HDR type (and Dolby Vision profile) of films without them is fetched in the
+        // background, 40 at a time (/library/metadata/<k1>,<k2>,...), and kept in the cache.
+        // Whether a Dolby Vision enhancement layer is full or minimal is not in Plex: the
+        // renderer reads it from the RPU while the film plays, and it is remembered here.
+        volatile bool hdrFilling;
+        void HdrFill()
+        {
+            if (hdrFilling) return;
+            List<Movie> want = new List<Movie>();
+            HashSet<string> seen = new HashSet<string>();
+            foreach (List<Movie> l in new[] { movies, recent, cont })
+                foreach (Movie m in l)
+                    if (m != null && m.Srv != null && m.Hdr.Length == 0 && m.Type != "show" && seen.Add(m.Srv.Id + ":" + m.Key)) want.Add(m);
+            if (want.Count == 0) return;
+            hdrFilling = true;
+            Bg2(delegate
+            {
+                Dictionary<string, List<Movie>> bySrv = new Dictionary<string, List<Movie>>();
+                foreach (Movie m in want) { if (!bySrv.ContainsKey(m.Srv.Id)) bySrv[m.Srv.Id] = new List<Movie>(); bySrv[m.Srv.Id].Add(m); }
+                int batchGot = 0, singleGot = 0, singleTried = 0, failed = 0;
+                foreach (List<Movie> l in bySrv.Values)
+                    for (int i = 0; i < l.Count; i += 40)
+                    {
+                        List<Movie> part = l.GetRange(i, Math.Min(40, l.Count - i));
+                        Dictionary<string, Movie> byKey = new Dictionary<string, Movie>();
+                        foreach (Movie m in part) byKey[m.Key] = m;
+                        try
+                        {
+                            object mc = Plex.Get(Plex.Json(Plex.Http("GET", Url(part[0].Srv, "/library/metadata/" + string.Join(",", new List<string>(byKey.Keys).ToArray())), part[0].Srv.Token, 30000)), "MediaContainer");
+                            foreach (object md in Plex.Arr(mc, "Metadata"))
+                            {
+                                Movie m;
+                                if (!byKey.TryGetValue(Plex.Str(md, "ratingKey"), out m)) continue;
+                                bool was = m.Detailed;
+                                Plex.FillMedia(m, md);
+                                m.Detailed = was;   // only the media: opening the film still fetches the rest
+                                if (m.Hdr.Length > 0) batchGot++;
+                            }
+                        }
+                        catch (Exception) { failed++; }
+                    }
+                // 2.89.1: a request for many films can come back without their streams; the
+                // rest one at a time, as the details screen asks (a short pause between them)
+                foreach (Movie m in want)
+                {
+                    if (m.Hdr.Length > 0) continue;
+                    singleTried++;
+                    try
+                    {
+                        object mc = Plex.Get(Plex.Json(Plex.Http("GET", Url(m.Srv, "/library/metadata/" + m.Key), m.Srv.Token, 15000)), "MediaContainer");
+                        object[] md = Plex.Arr(mc, "Metadata");
+                        if (md.Length > 0)
+                        {
+                            bool was = m.Detailed;
+                            Plex.FillMedia(m, md[0]);
+                            m.Detailed = was;
+                            if (m.Hdr.Length > 0) singleGot++;
+                        }
+                    }
+                    catch (Exception) { failed++; }
+                    Thread.Sleep(30);
+                }
+                try
+                {
+                    File.AppendAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipGuard", "MediaPlayer", "hdrfill.log"),
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "  wanted " + want.Count + ", from batches " + batchGot
+                        + ", one by one " + singleGot + " of " + singleTried + ", failed requests " + failed + "\r\n");
+                }
+                catch (Exception) { }
+            }, delegate { hdrFilling = false; SaveLibraryCache(); Invalidate(); }, delegate(Exception ex) { hdrFilling = false; });
+        }
+
+        // Full / minimal enhancement layers seen while playing, by server and film.
+        static Dictionary<string, string> dvElSeen;
+        static string DvElPath { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipGuard", "MediaPlayer", "dvel.txt"); } }
+        static string DvElOf(Movie m)
+        {
+            if (m.DvEl.Length > 0 || m.Srv == null) return m.DvEl;
+            if (dvElSeen == null)
+            {
+                dvElSeen = new Dictionary<string, string>();
+                try { foreach (string l in File.ReadAllLines(DvElPath)) { string[] f = l.Split('\t'); if (f.Length == 2) dvElSeen[f[0]] = f[1]; } } catch (Exception) { }
+            }
+            string v;
+            if (dvElSeen.TryGetValue(m.Srv.Id + ":" + m.Key, out v)) m.DvEl = v;
+            return m.DvEl;
+        }
+        static void DvElRemember(Movie m, string v)
+        {
+            if (m == null || m.Srv == null || DvElOf(m) == v) return;
+            m.DvEl = v;
+            dvElSeen[m.Srv.Id + ":" + m.Key] = v;
+            try
+            {
+                List<string> lines = new List<string>();
+                foreach (KeyValuePair<string, string> kv in dvElSeen) lines.Add(kv.Key + "\t" + kv.Value);
+                File.WriteAllLines(DvElPath, lines.ToArray());
+            }
+            catch (Exception) { }
+        }
+
+        // The tag under the resolution badge: DV with its profile (and FEL / MEL once known),
+        // HDR10, HLG; nothing for SDR. Public: HDR for Dolby Vision and HDR10.
+        static void HdrTag(Graphics g, Movie m, float right, float top)
+        {
+            string t = "", chip = "";
+            if (m.Hdr == "Dolby Vision")
+            {
+                t = "HDR";
+            }
+            else if (m.Hdr == "HDR10") t =
+                "HDR";
+            else if (m.Hdr == "HLG") t = "HLG";
+            if (t.Length == 0) return;
+            SmoothingMode sm = g.SmoothingMode;
+            TextRenderingHint th = g.TextRenderingHint;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            using (Font f = new Font(BadgeFamily, 11.5f, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (Font fc = new Font(BadgeFamily, 9f, FontStyle.Bold, GraphicsUnit.Pixel))
+            {
+                SizeF ts = g.MeasureString(t, f, PointF.Empty, StringFormat.GenericTypographic);
+                SizeF cs = chip.Length > 0 ? g.MeasureString(chip, fc, PointF.Empty, StringFormat.GenericTypographic) : SizeF.Empty;
+                const float h = 18, padX = 6;
+                float chipW = chip.Length > 0 ? cs.Width + 7 : 0;
+                float w = padX + ts.Width + (chip.Length > 0 ? 5 + chipW : 0) + padX;
+                RectangleF r = new RectangleF(right - w, top, w, h);
+                using (GraphicsPath sp = RoundRect(new RectangleF(r.X + 1, r.Y + 2.5f, r.Width, r.Height), 3.5f))
+                using (SolidBrush sb = new SolidBrush(Color.FromArgb(140, 0, 0, 0))) g.FillPath(sb, sp);
+                using (GraphicsPath op = RoundRect(r, 3.5f)) using (SolidBrush wb = new SolidBrush(Color.White)) g.FillPath(wb, op);
+                RectangleF inner = new RectangleF(r.X + 1.5f, r.Y + 1.5f, r.Width - 3, r.Height - 3);
+                using (GraphicsPath ip = RoundRect(inner, 2.5f)) using (SolidBrush kb = new SolidBrush(Color.FromArgb(21, 20, 23))) g.FillPath(kb, ip);
+                float tx = r.X + padX, ty = r.Y + (h - ts.Height) / 2 + 0.5f;
+                using (LinearGradientBrush nb = new LinearGradientBrush(new PointF(0, ty + 1), new PointF(0, ty + ts.Height - 1), Color.Gold, Color.Gold))
+                {
+                    ColorBlend cb = new ColorBlend(4);
+                    cb.Colors = new[] { Color.FromArgb(255, 246, 200), Color.FromArgb(255, 210, 58), Color.FromArgb(201, 138, 0), Color.FromArgb(255, 226, 122) };
+                    cb.Positions = new[] { 0f, 0.4f, 0.7f, 1f };
+                    nb.InterpolationColors = cb;
+                    g.DrawString(t, f, nb, tx, ty, StringFormat.GenericTypographic);
+                }
+                if (chip.Length > 0)
+                {
+                    RectangleF c = new RectangleF(tx + ts.Width + 5, inner.Y + 2, chipW, inner.Height - 4);
+                    using (GraphicsPath cp = RoundRect(c, 2))
+                    using (LinearGradientBrush gb = new LinearGradientBrush(new PointF(c.X, c.Y), new PointF(c.Right, c.Bottom), Color.Gold, Color.Gold))
+                    {
+                        ColorBlend cb = new ColorBlend(3);
+                        cb.Colors = new[] { Color.FromArgb(255, 243, 176), Color.FromArgb(255, 210, 58), Color.FromArgb(217, 154, 0) };
+                        cb.Positions = new[] { 0f, 0.4f, 1f };
+                        gb.InterpolationColors = cb;
+                        g.FillPath(gb, cp);
+                    }
+                    using (SolidBrush lb = new SolidBrush(Color.FromArgb(21, 20, 23)))
+                        g.DrawString(chip, fc, lb, c.X + (c.Width - cs.Width) / 2, c.Y + (c.Height - cs.Height) / 2 + 0.5f, StringFormat.GenericTypographic);
+                }
+            }
+            g.SmoothingMode = sm;
+            g.TextRenderingHint = th;
+        }
+
+        // 2.88.9: a small gold badge: gold frame, gold numerals on a black panel, the name
+        // in black on the gold below, a colour edge on the left (4K red, 1080p blue,
+        // 720p / SD yellow) and a white outline.
+        static float ResBadge(Graphics g, string res, float right, float top)
+        {
+            if (string.IsNullOrEmpty(res)) return top;
+            string t, sub; Color c;
+            if (res == "4K") { t = "4K"; sub = "ULTRA HD"; c = Color.FromArgb(227, 38, 60); }
+            else if (res == "1080p") { t = "1080p"; sub = "FULL HD"; c = Color.FromArgb(30, 99, 200); }
+            else if (res == "720p") { t = "720p"; sub = "HD"; c = Color.FromArgb(245, 196, 0); }
+            else { t = "SD"; sub = "SD"; c = Color.FromArgb(245, 196, 0); }
+            SmoothingMode sm = g.SmoothingMode;
+            TextRenderingHint th = g.TextRenderingHint;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            using (Font f = new Font(BadgeFamily, 20, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (Font fs = new Font(BadgeFamily, 7.5f, FontStyle.Bold, GraphicsUnit.Pixel))
+            {
+                SizeF sz = g.MeasureString(t, f, PointF.Empty, StringFormat.GenericTypographic);
+                SizeF ss = g.MeasureString(sub, fs, PointF.Empty, StringFormat.GenericTypographic);
+                const float pad = 2.5f, edge = 4, panelH = 21, labelH = 9.5f;
+                float panelW = (float)Math.Ceiling(Math.Max(sz.Width + 10, ss.Width + 6));
+                float bw = 1.5f + edge + pad + panelW + pad + 1.5f, bh = 1.5f + pad + panelH + labelH + pad - 1 + 1.5f;
+                RectangleF outer = new RectangleF(right - bw, top, bw, bh);
+                // shadow, white outline
+                using (GraphicsPath sp = RoundRect(new RectangleF(outer.X + 1, outer.Y + 3, outer.Width, outer.Height), 4))
+                using (SolidBrush sb = new SolidBrush(Color.FromArgb(140, 0, 0, 0))) g.FillPath(sb, sp);
+                using (GraphicsPath op = RoundRect(outer, 4)) using (SolidBrush wb = new SolidBrush(Color.White)) g.FillPath(wb, op);
+                RectangleF inner = new RectangleF(outer.X + 1.5f, outer.Y + 1.5f, outer.Width - 3, outer.Height - 3);
+                GraphicsState st = g.Save();
+                using (GraphicsPath ip = RoundRect(inner, 3))
+                {
+                    g.SetClip(ip);
+                    // gold frame, lit from the top left
+                    using (LinearGradientBrush gb = new LinearGradientBrush(new PointF(inner.X, inner.Y), new PointF(inner.Right, inner.Bottom), Color.Gold, Color.Gold))
+                    {
+                        ColorBlend cb = new ColorBlend(5);
+                        cb.Colors = new[] { Color.FromArgb(255, 243, 176), Color.FromArgb(255, 210, 58), Color.FromArgb(217, 154, 0), Color.FromArgb(255, 226, 122), Color.FromArgb(168, 111, 0) };
+                        cb.Positions = new[] { 0f, 0.22f, 0.48f, 0.7f, 1f };
+                        gb.InterpolationColors = cb;
+                        g.FillRectangle(gb, inner);
+                    }
+                    // the colour edge
+                    using (SolidBrush eb = new SolidBrush(c)) g.FillRectangle(eb, inner.X, inner.Y, edge, inner.Height);
+                    using (Pen ep = new Pen(Color.FromArgb(180, 255, 255, 255), 1)) g.DrawLine(ep, inner.X + edge, inner.Y, inner.X + edge, inner.Bottom);
+                }
+                g.Restore(st);
+                // black panel with gold numerals
+                RectangleF panel = new RectangleF(inner.X + edge + pad, inner.Y + pad, panelW, panelH);
+                using (GraphicsPath pp = RoundRect(panel, 1.5f)) using (SolidBrush kb = new SolidBrush(Color.FromArgb(21, 20, 23))) g.FillPath(kb, pp);
+                float tx = panel.X + (panel.Width - sz.Width) / 2, ty = panel.Y + (panel.Height - sz.Height) / 2 + 0.5f;
+                using (LinearGradientBrush nb = new LinearGradientBrush(new PointF(0, ty + 2), new PointF(0, ty + sz.Height - 2), Color.Gold, Color.Gold))
+                {
+                    ColorBlend cb = new ColorBlend(5);
+                    cb.Colors = new[] { Color.FromArgb(255, 246, 200), Color.FromArgb(255, 210, 58), Color.FromArgb(201, 138, 0), Color.FromArgb(255, 226, 122), Color.FromArgb(176, 120, 0) };
+                    cb.Positions = new[] { 0f, 0.35f, 0.62f, 0.85f, 1f };
+                    nb.InterpolationColors = cb;
+                    g.DrawString(t, f, nb, tx, ty, StringFormat.GenericTypographic);
+                }
+                // the name in black on the gold
+                float sx = panel.X + (panel.Width - ss.Width) / 2, sy = panel.Bottom + (labelH - ss.Height) / 2 + 0.5f;
+                using (SolidBrush lb = new SolidBrush(Color.FromArgb(21, 20, 23))) g.DrawString(sub, fs, lb, sx, sy, StringFormat.GenericTypographic);
+            }
+            g.SmoothingMode = sm;
+            g.TextRenderingHint = th;
+            return top + 37.5f;
         }
 
         void PosterRow(Graphics g, List<Movie> l, int row, float y, bool active)
@@ -6113,6 +6803,7 @@ namespace ClipGuard
             {
                 float x = 96 + k * (w + gap);
                 Movie m = l[i];
+                { int ii = i, rw = row; Hit(new RectangleF(x, y, w, h + 60), delegate { navFocus = false; homeRow = rw; homeCol[rw] = ii; }); }   // 0.9.2: mouse
                 Poster(g, m, i + row * 3, x, y, w, h, active && !navFocus && i == col);
                 bool ep = m.Type == "episode";
                 TextBox(g, ep ? m.ShowTitle : m.Title, 20, true, Color.White, new RectangleF(x, y + h + 10, w, 28));
@@ -6174,6 +6865,7 @@ namespace ClipGuard
                 float x = 96 + cc * (w + gapX), y = top + rr * rowH;
                 if (y > 1000) break;
                 Movie m = movies[i];
+                { int ii = i; Hit(new RectangleF(x, y, w, h + 60), delegate { navFocus = false; GIdx = ii; }); }   // 0.9.2: mouse
                 Poster(g, m, i, x, y, w, h, !navFocus && i == gridIdx);
                 TextBox(g, m.Title, 20, true, Color.White, new RectangleF(x, y + h + 10, w, 28));
                 string sub = m.Type == "show" && m.LeafCount > 0
@@ -6181,6 +6873,7 @@ namespace ClipGuard
                     : (m.Year > 0 ? m.Year.ToString(CultureInfo.InvariantCulture) : "");
                 Txt(g, sub, 18, false, Grey, x, y + h + 38);
             }
+            using (SolidBrush fb = new SolidBrush(Bg)) g.FillRectangle(fb, 0, 1024, 1920, 56);   // 2.88.0: the footer on its own band (the third row ran under it)
             Txt(g, string.Format(CultureInfo.InvariantCulture, "{0}   \u00b7   {1} of {2}   (OK on the tab: sort)", SortLabel(), gridIdx + 1, movies.Count), 18, false, Grey, 1240, 1036);   // 2.86.1
         }
 
@@ -6220,6 +6913,7 @@ namespace ClipGuard
                 {
                     SizeF sz = g.MeasureString(btns[i], f);
                     RectangleF r = new RectangleF(px, 610, sz.Width + 64, 70);
+                    { int ii = i; Hit(r, delegate { detOnVersion = false; detBtn = ii; }); }   // 0.9.2: mouse
                     bool sel = i == detBtn && !detOnVersion;
                     using (SolidBrush b = new SolidBrush(sel ? Yellow : Card)) g.FillRectangle(b, r);
                     using (SolidBrush b = new SolidBrush(sel ? Bg : Color.White)) g.DrawString(btns[i], f, b, px + 32, 628);
@@ -6239,6 +6933,7 @@ namespace ClipGuard
                 Txt(g, "Version", 24, true, Color.White, x + 28, 769);
                 Txt(g, "\u2039  " + m.Versions[m.VerIdx].Label() + "  \u203a", 24, false, Color.White, x + 200, 769);
                 Txt(g, (m.VerIdx + 1).ToString(CultureInfo.InvariantCulture) + " of " + m.Versions.Count.ToString(CultureInfo.InvariantCulture), 22, false, Grey, x + 1160, 771);
+                Hit(r, delegate { detOnVersion = true; });
                 if (detOnVersion) Focus(g, r);
             }
             Txt(g, m.Versions.Count > 1 ? "Left / Right: choose    Down: version    Enter: select    Backspace: back"
@@ -6298,14 +6993,15 @@ namespace ClipGuard
             for (int i = 0; i < rows.Length; i++)
             {
                 string[] p = rows[i].Split('\t');
-                float y = 136 + i * 54;   // 2.87.1: fourteen rows (2.86.0: 58 apart, 2.75.0: 64)
+                float y = 136 + i * (rows.Length > 14 ? 50 : 54);   // 2.87.1: fourteen rows (2.86.0: 58 apart, 2.75.0: 64); 2.89.1: fifteen, 50 apart
                 RectangleF r = new RectangleF(96, y, 1728, 48);
                 using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, r);
                 Txt(g, p[0], 24, true, Color.White, 126, y + 9);
                 TextBox(g, p.Length > 1 ? p[1] : "", 22, false, Grey, new RectangleF(720, y + 11, 1090, 34));
+                { int ii = i; Hit(r, delegate { navFocus = false; setIdx = ii; }); }   // 0.9.2: mouse
                 if (!navFocus && i == setIdx) Focus(g, r);
             }
-            string help = SetRow() == 0 ? HelpDelay() : SetRow() == 2
+            string help = IsAboutRow() ? "The player's version and build, this PC and its connections. Enter shows them; Copy puts them on the clipboard for a GitHub issue." : SetRow() == 0 ? HelpDelay() : SetRow() == 2
                 ? "Plays a flash with a beep. Left / Right moves the sound 10 ms; Enter keeps it, Esc cancels. Do it once with look-ahead Off (F7 menu)."
                 : (SetRow() == 3 ? "All servers shows the movies of every server together; or choose one."
                 : (SetRow() == 5 ? "Asks for each button in turn (arrows, OK, Back, Play/Pause, Stop, chapters, skip, Menu) and stores what your remote sends. Wait 8 s to skip a button it doesn't have."

@@ -1,25 +1,21 @@
-**Public beta.** Download **ClipGuard Media Player Setup 0.9.1.exe** below and run it (no administrator rights needed). It installs over 0.9.0 and keeps your settings. See the [README](https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player#readme) for requirements, setup, keys and the remote.
+**Public beta.** Download **ClipGuard Media Player Setup 0.9.2.exe** below and run it (no administrator rights needed). It installs over 0.9.1 and keeps your settings. See the [README](https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player#readme) for requirements, setup, keys, the remote and the mouse.
 
-**New in 0.9.1**
+**New in 0.9.2**
 
-- Power tab: Close ClipGuard Media Player, Restart ClipGuard Media Player, Shut down the HTPC.
-- Esc and Back only go back a screen; they never close the player (Alt+F4 or Power > Close does).
-- Settings > Start with Windows: opens the player when you sign in.
-- Settings > Theme: Midnight, Cinema, Ocean, Graphite or High Contrast.
-- Settings > Menu sounds: Off, Soft or Normal (library and menus only).
-- Movies and TV Shows: OK on the tab opens Sort by (title, date added, release year, running time) and Show (all, or unwatched only).
-- Sound / Subtitles menu: Up from the first line reaches the Sound / Subtitles tabs; Left / Right switches between them.
-- During a film, Up and Down no longer skip a minute.
-- Learn remote: new Video Processor, Media Player and Banner buttons (Ctrl+V and Ctrl+M on a keyboard). A button skipped while learning keeps what it had.
-- A remote's Home button shows or hides ClipGuard's banner (F6) while the player is in front, and it stays up until pressed again.
-- Top banner: the text below the top row is 25% bigger.
-- Home screen: the rows no longer run into the help line.
-- Video Processor: Info is smaller, in the corner, and only on I; "Waiting for signal" is a small card after 3 seconds.
-- Fixed a crash when switching to Video Processor.
+- Mouse: point to select, click to open, right-click for Back, the wheel to move. While watching, a move shows the film's bar, a click is Play / Pause. The pointer hides after 3 seconds.
+- Covers: a gold resolution badge (4K, 1080p, 720p / SD) with a coloured edge (red, blue, yellow), and an HDR or HLG tag under it.
+- Settings > About: version and build, your PC (Windows, processor, memory, graphics card and driver, display mode) and the Plex server. OK copies it all for an issue.
+- ClipGuard's banner is a fixed grid: two rows of five columns that line up and don't move while a film plays.
+- The banner shows which calibration LUT is on (or off with F5).
+- Picture > Display & Output > Output gamma: 2.2, 2.4 or BT.1886, for a projector set to that gamma (not used while a calibration LUT is on).
+- Calibration: choose any .ccss file in the Calibration folder.
+- Calibration: black and white check screens with instructions before measuring; the meter checks that the brightest greys aren't squeezed together.
+- Calibration: colours the projector can't reach keep its own most saturated colour instead of being pulled off hue (blue in particular).
+- Calibration: a meter that stops answering no longer freezes the run. It stops with the meter's error, and a LUT is never built from part of the readings.
 
 Video Processor needs an unencrypted HDMI signal.
 
-Please report problems as [issues](https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player/issues), with `crash.log` from `%LOCALAPPDATA%\ClipGuard\MediaPlayer` if there is one.
+Please report problems as [issues](https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player/issues), with what Settings > About copies and `crash.log` from `%LOCALAPPDATA%\ClipGuard\MediaPlayer` if there is one.
 
 Built from:
 - engine: [unplugged-mpc-hc, branch clipguard-media-player](https://github.com/peterbiancardi-fenceman/unplugged-mpc-hc/tree/clipguard-media-player)

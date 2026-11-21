@@ -503,7 +503,7 @@ namespace ClipGuard
             OOverlayOn = 28, OPinned = 32, OSelected = 36, OLastKey = 40, OExeTick = 44,
             ORendTick = 48, OPicture = 52, OSceneNits = 56, OAmount = 60, OCeiling = 64, OKneeEff = 68,
             OOutputPQ = 72, OSrcMax = 76, OClipFrac = 80, OBottomBar = 84, OColorProtect = 88, OFullPct = 92, OTextSkip = 96, OHotSpot = 108, OFixShape = 120, OGrid = 128, OLookAhead = 132,
-            OLogRequest = 136, OLogDone = 140, OLogState = 144, OLogStateTick = 148, OHotBelow = 152, OGradedSpot = 156, OBuildKind = 160, OTestMarker = 164, OSpotMask = 168, OInfo = 172, OGpuLoad = 176, ODimFire = 180, OUpscaler = 184, OEdition = 188, OKscape = 192, ODither = 196, OProjector = 200, OLutOff = 204, OLut = 208, OSource = 212, OSsr = 216;
+            OLogRequest = 136, OLogDone = 140, OLogState = 144, OLogStateTick = 148, OHotBelow = 152, OGradedSpot = 156, OBuildKind = 160, OTestMarker = 164, OSpotMask = 168, OInfo = 172, OGpuLoad = 176, ODimFire = 180, OUpscaler = 184, OEdition = 188, OKscape = 192, ODither = 196, OProjector = 200, OLutOff = 204, OLut = 208, OSource = 212, OSsr = 216, OFel = 220, OOutGamma = 224, ODoviEl = 228;
 
         readonly MemoryMappedFile map;
         readonly MemoryMappedViewAccessor view;
@@ -532,6 +532,7 @@ namespace ClipGuard
             view.Write(ODimFire, s.DimFire ? 1 : 0);
             view.Write(OUpscaler, Edition.Plus ? s.Upscaler : 0);
             view.Write(OSsr, Edition.Plus ? s.Ssr : 0);   // 2.85.0: SSimSuperRes
+            view.Write(OOutGamma, s.OutGamma);           // 2.88.1: 0 = 2.2, 1 = 2.4, 2 = BT.1886
             view.Write(OEdition, Edition.Plus ? 1 : 0);
             // 1 = Kaleidescape (ClipGuard+); 2.64.1 (Player): 2 = Video Processor, 3 = Media Player.
             view.Write(OKscape, s.PlayerSource == 2 ? 2 : (s.PlayerSource == 1 ? 3 : (s.KscapeActive ? 1 : 0)));
@@ -582,6 +583,7 @@ namespace ClipGuard
         public float Amount { get { return view.ReadSingle(OAmount); } }
         public float Ceiling { get { return view.ReadSingle(OCeiling); } }
         public bool OutputPQ { get { return view.ReadInt32(OOutputPQ) != 0; } }
+        public int DoviEl { get { return view.ReadInt32(ODoviEl); } }   // 2.89.0: written by the renderer, 1 MEL, 2 FEL
 
         public void Dispose()
         {
@@ -690,6 +692,7 @@ namespace ClipGuard
         public bool DimFire;              // Dim fire: false = clearly orange or red lights (flames, candles) are left alone
         public int Upscaler = 0;          // Upscaler: 0 = Normal, 1 = FSRCNNX, 2 = ArtCNN C4F32 (2.85.0) (neural 2x for 1080p on a 4K screen)
         public int Ssr = 0;               // 2.85.0: SSimSuperRes after scaling (1 = on)
+        public int OutGamma = 0;          // 2.88.1: the projector's gamma: 0 = 2.2 (Unplugged's), 1 = 2.4, 2 = BT.1886
         public int Dither = 0;            // Dither: 0 = Static, 1 = Temporal (the pattern moves every frame) (2.45.0)
         public bool LutOff = false;       // 2.48.2: F5, calibration LUT off for comparing (not saved: always starts on)
         public int Projector = 0;         // Projector: 0 = Universal (Reactive), 1 = Titan Noir Max DBLE High (Predictive) (2.46.0), 3 = DBLE Low (2.60.0); Valerion (2) removed in 2.51.2
@@ -701,7 +704,7 @@ namespace ClipGuard
         public int View = 0;
         public bool Pinned = false;
         public string KscapeIP = "auto";  // ClipGuard+: Kaleidescape player address, "auto" (find it) or "off"
-        public int KscapeLookAhead = 4;   // ClipGuard+: Look-ahead while the Kaleidescape plays a movie (2.63.1: 4, was 6)
+        public int KscapeLookAhead = 2;   // ClipGuard+: Look-ahead while the Kaleidescape plays a movie (2.63.1: 4, was 6; 2.89.2: 2, so the XMC-2's 250 ms covers it)
         public int VpLookAhead = 4;       // 2.64.1 (Player): Look-ahead for Video Processor (capture); LookAhead is the Media Player's
         // not saved
         public int PlayerSource = 0;      // 2.64.1 (Player): 0 none, 1 Media Player (a film), 2 Video Processor (capture)
@@ -746,6 +749,7 @@ namespace ClipGuard
             s.DimFire = Read(ini, "DimFire", 0) > 0.5;
             s.Upscaler = Edition.Plus ? (int)Clamp(Math.Round(Read(ini, "Upscaler", 0)), 0, 2) : 0;
             s.Ssr = Edition.Plus ? (int)Clamp(Math.Round(Read(ini, "SSimSuperRes", 0)), 0, 1) : 0;
+            s.OutGamma = (int)Clamp(Math.Round(Read(ini, "OutputGamma", 0)), 0, 2);
             s.HotSpotLast = Clamp(Read(ini, "HotSpotLast", s.HotSpot > 0.0 ? s.HotSpot : 0.6), 0.05, 1.0);
             s.Grid = (int)Clamp(Read(ini, "Grid", 1), 0, 1);
             s.LookAhead = NormLookAhead((int)Math.Round(Read(ini, "LookAhead", 4)));
@@ -758,12 +762,14 @@ namespace ClipGuard
             s.Lut = (int)Clamp(Math.Round(Read(ini, "Lut", pj == 3 ? 1 : pj)), 0, 2);
             string ip = Native.ReadIni(ini, "ClipGuard", "KaleidescapeIP", "auto").Trim();
             s.KscapeIP = ip.Length == 0 ? "auto" : ip;
-            s.KscapeLookAhead = NormLookAhead((int)Math.Round(Read(ini, "KaleidescapeLookAhead", 4)));
+            s.KscapeLookAhead = NormLookAhead((int)Math.Round(Read(ini, "KaleidescapeLookAhead", 2)));
             // 2.63.1: the default moved from 6 to 4 frames (the Titan's Predictive modes don't use
             // frames ahead); a saved 6 from before is moved once.
             if (Read(ini, "KaleidescapeLookAhead4", 0) < 0.5 && s.KscapeLookAhead == 6) s.KscapeLookAhead = 4;
             // 2.64.1: Video Processor's look-ahead starts at the Kaleidescape one (4 frames).
-            s.VpLookAhead = NormLookAhead((int)Math.Round(Read(ini, "VideoProcessorLookAhead", s.KscapeLookAhead)));
+            s.VpLookAhead = NormLookAhead((int)Math.Round(Read(ini, "VideoProcessorLookAhead", 4)));
+            // 2.89.2: 2 frames for the Kaleidescape (2 frames + Unplugged's 100 ms = 183 ms, inside the
+            // XMC-2's 250 ms audio delay; 4 frames was 267 ms); a saved 4 from before is moved once.
             s.View = (int)Clamp(Read(ini, "View", 0), 0, 3);
             s.Pinned = Read(ini, "OverlayPinned", 0) > 0.5;
             return s;
@@ -785,6 +791,7 @@ namespace ClipGuard
             W(ini, "GradedSpot", GradedSpot.ToString("0.00", CultureInfo.InvariantCulture));
             W(ini, "HotSpotMask", SpotMask.ToString(CultureInfo.InvariantCulture));
             W(ini, "DimFire", DimFire ? "1" : "0");
+            W(ini, "OutputGamma", OutGamma.ToString(CultureInfo.InvariantCulture));
             if (Edition.Plus)
             {
                 W(ini, "Upscaler", Upscaler.ToString(CultureInfo.InvariantCulture));
@@ -923,7 +930,7 @@ namespace ClipGuard
 
 #if PLUS
         // ClipGuard+: the Kaleidescape player; while it plays a movie the
-        // renderer gets its look-ahead (KaleidescapeLookAhead, 4 frames).
+        // renderer gets its look-ahead (KaleidescapeLookAhead, 2 frames since 2.89.2).
         KscapeWatch kscape;
         string kscapeSaved;
         void KscapeTick()
@@ -1552,6 +1559,8 @@ namespace ClipGuard
         public void SetNeuralUpscaler(int v) { v = Math.Max(0, Math.Min(2, v)); if (s.Upscaler != v) { s.Upscaler = v; Changed(); } }
         public bool Ssr() { return s.Ssr == 1; }
         public void SetSsr(bool on) { int v = on ? 1 : 0; if (s.Ssr != v) { s.Ssr = v; Changed(); } }
+        public int OutGamma() { return s.OutGamma; }   // 2.88.1
+        public void SetOutGamma(int v) { v = Math.Max(0, Math.Min(2, v)); if (s.OutGamma != v) { s.OutGamma = v; Changed(); } }
 #endif
 
         public void MediaClosed()

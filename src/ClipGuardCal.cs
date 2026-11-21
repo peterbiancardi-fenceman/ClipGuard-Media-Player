@@ -155,11 +155,16 @@ namespace ClipGuard
         double At(int r, int g, int b, int k) { return d[((b * N + g) * N + r) * 3 + k]; }
 
         // Writes a copy where the LUT fades to no change below lo..hi (input's brightest channel).
-        public static void BlendDark(string src, string dst, double lo, double hi)
+        // 2.88.7: edgeLo..edgeHi (saturation, (max-min)/max): colours at the edge of what the
+        // projector can show fade to its own colour, so a pure BT.2020 blue it can't reach
+        // stays its most saturated blue instead of being pulled off hue; less saturated
+        // colours keep the full correction. edgeLo >= 1 turns it off.
+        public static void BlendDark(string src, string dst, double lo, double hi, double edgeLo = 2, double edgeHi = 3)
         {
             Cube c = Load(src);
             int N = c.N;
-            StringBuilder sb = new StringBuilder("# ClipGuard: ArgyllCMS LUT, black and near-black left native\nLUT_3D_SIZE " + N + "\n");
+            bool edge = edgeLo < 1;
+            StringBuilder sb = new StringBuilder("# ClipGuard: ArgyllCMS LUT, " + (edge ? "edge colours kept native, " : "") + "black and near-black left native\nLUT_3D_SIZE " + N + "\n");
             for (int b = 0; b < N; b++)
                 for (int g = 0; g < N; g++)
                     for (int r = 0; r < N; r++)
@@ -168,6 +173,12 @@ namespace ClipGuard
                         double t = Math.Max(inp[0], Math.Max(inp[1], inp[2]));
                         double u = Math.Max(0, Math.Min(1, (t - lo) / (hi - lo)));
                         double w = u * u * (3 - 2 * u);
+                        if (edge && t > 0)
+                        {
+                            double sat = (t - Math.Min(inp[0], Math.Min(inp[1], inp[2]))) / t;
+                            double e = Math.Max(0, Math.Min(1, (sat - edgeLo) / (edgeHi - edgeLo)));
+                            w *= 1 - e * e * (3 - 2 * e);
+                        }
                         double[] o = new double[3];
                         for (int k = 0; k < 3; k++) o[k] = inp[k] + w * (c.At(r, g, b, k) - inp[k]);
                         sb.AppendFormat(CultureInfo.InvariantCulture, "{0:0.000000} {1:0.000000} {2:0.000000}\n", o[0], o[1], o[2]);
@@ -323,6 +334,7 @@ namespace ClipGuard
         volatile bool calWaiting;          // the run waits for Enter (or Esc)
         readonly AutoResetEvent calGo = new AutoResetEvent(false);
         volatile bool calEsc;
+        volatile bool calSkip;             // 2.88.6: S / Right on a check screen = carry on
 
         string CalSetupText()
         {
@@ -348,7 +360,8 @@ namespace ClipGuard
         {
             if (calWaiting)
             {
-                if (k == Keys.Enter || k == Keys.Return) { calEsc = false; calGo.Set(); return true; }
+                if (k == Keys.Enter || k == Keys.Return) { calEsc = false; calSkip = false; calGo.Set(); return true; }
+                if (k == Keys.S || k == Keys.Right) { calEsc = false; calSkip = true; calGo.Set(); return true; }
                 if (k == Keys.Escape) { calEsc = true; cancel = true; calGo.Set(); return true; }
                 return true;
             }
@@ -469,12 +482,102 @@ namespace ClipGuard
         bool CalWait(MScene sc)
         {
             calEsc = false;
+            calSkip = false;
             calGo.Reset();
             calWaiting = true;
             Show(sc);
             calGo.WaitOne();
             calWaiting = false;
             return !calEsc;
+        }
+
+        // ---- 2.88.6: level checks before the white: black (brightness, low-end tint) and
+        // white (contrast, top-end clipping), each a pattern with its instructions; the
+        // white one is then measured (250 and 254 against 255) and shown again until the
+        // top end is no longer clipping, or S carries on.
+        void CalLevelChecks()
+        {
+            Size sz = (Size)Invoke(new Func<Size>(() => ClientSize));
+            // (the pictures are not disposed here: the window may still paint the last one)
+            if (!CalWait(new MScene { Id = "check_black", Canvas = CalPattern(false, sz.Width, sz.Height, null), Patch = -1 })) throw new OperationCanceledException();
+            string warn = null;
+            while (true)
+            {
+                if (!CalWait(new MScene { Id = "check_white", Canvas = CalPattern(true, sz.Width, sz.Height, warn), Patch = -1 })) throw new OperationCanceledException();
+                if (calSkip) return;
+                Status("Measuring the top end...");
+                MReading r255 = CalRead("top_255", 255, 255, 255, 1.0, 3);
+                MReading r250 = CalRead("top_250", 250, 250, 250, 0.5, 3);
+                MReading r254 = CalRead("top_254", 254, 254, 254, 0.5, 3);
+                if (!r255.Ok || !r250.Ok || r255.Y <= 0)
+                {
+                    warn = "The meter gave no reading (" + (r255.Ok ? r250.Error : r255.Error) + "). Enter = measure again,  S = carry on anyway.";
+                    continue;
+                }
+                double q250 = r250.Y / r255.Y, q254 = r254.Ok ? r254.Y / r255.Y : double.NaN;
+                double e250 = Math.Pow(250 / 255.0, 2.2), e254 = Math.Pow(254 / 255.0, 2.2);
+                csv.AppendFormat(CultureInfo.InvariantCulture, "# top end: 250 = {0:0.0000} of 255 (expected {1:0.0000}), 254 = {2:0.0000} (expected {3:0.0000})\n", q250, e250, q254, e254);
+                // the top end is squeezed when 250 sits less than 3/4 of its expected step below
+                // white (the 21 Nov run: about 2/3, with 247 to 255 bunched together)
+                if (1 - q250 >= (1 - e250) * 0.75) return;
+                warn = string.Format(CultureInfo.InvariantCulture,
+                    "The top end is still squeezed: 250 reads {0:0.0}% of white (about {1:0.0}% expected){2}. Lower contrast a step (or the gain of a tinted colour), then Enter = measure again,  S = carry on anyway.",
+                    q250 * 100, e250 * 100, double.IsNaN(q254) ? "" : string.Format(CultureInfo.InvariantCulture, ", 254 reads {0:0.0}% (about {1:0.0}%)", q254 * 100, e254 * 100));
+            }
+        }
+
+        // The pattern screens: patches on a black or white surround in a band across the
+        // centre, black around it (a small bright area, as the measuring windows are), the
+        // levels written under them, and the instructions below.
+        static Bitmap CalPattern(bool white, int W, int H, string warn)
+        {
+            int[] lv = white ? new[] { 230, 235, 240, 244, 246, 248, 250, 251, 252, 253, 254 } : new[] { 1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16, 20 };
+            int sur = white ? 255 : 0;
+            Bitmap bm = new Bitmap(W, H);
+            using (Graphics g = Graphics.FromImage(bm))
+            using (Font ft = new Font("Segoe UI", Math.Max(14, H / 38f), FontStyle.Bold))
+            using (Font fl = new Font("Segoe UI", Math.Max(11, H / 50f), FontStyle.Bold))
+            using (Font fi = new Font("Segoe UI", Math.Max(11, H / 54f)))
+            {
+                g.Clear(Color.Black);
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                float pw = 150f * W / 3840f, ph = 420f * H / 2160f, gap = 20f * W / 3840f;   // scales with the screen
+                float bw = lv.Length * pw + (lv.Length + 1) * gap, x0 = (W - bw) / 2f, y0 = H * 0.30f;
+                using (SolidBrush sb = new SolidBrush(Color.FromArgb(sur, sur, sur))) g.FillRectangle(sb, x0, y0, bw, ph + 2 * gap);
+                for (int i = 0; i < lv.Length; i++)
+                {
+                    float x = x0 + gap + i * (pw + gap);
+                    using (SolidBrush pb = new SolidBrush(Color.FromArgb(lv[i], lv[i], lv[i]))) g.FillRectangle(pb, x, y0 + gap, pw, ph);
+                    string t = lv[i].ToString(CultureInfo.InvariantCulture);
+                    SizeF ts = g.MeasureString(t, fl);
+                    g.DrawString(t, fl, Brushes.White, x + (pw - ts.Width) / 2f, y0 + ph + 2 * gap + H * 0.01f);
+                }
+                string title = white ? "WHITE CHECK (contrast)" : "BLACK CHECK (brightness)";
+                SizeF tt = g.MeasureString(title, ft);
+                g.DrawString(title, ft, Brushes.White, (W - tt.Width) / 2f, y0 - tt.Height - H * 0.03f);
+                string ins = white
+                    ? "Patches 230 to 254 on full white.  Raise contrast until 252 to 254 blend into the white, then lower it until 253 shows again (254 too if you can).\n"
+                      + "All the patches should look neutral grey: if the brightest look tinted, lower that colour's high-end gain a step.\n"
+                      + "Enter = measure the top end (the meter checks 250 and 254 against white)     S = skip     Esc = stop"
+                    : "Patches 1 to 20 on black.  Set brightness so 2 or 3 is just visible and 1 is not.\n"
+                      + "8 to 20 should look neutral grey: if they look reddish (or any colour), adjust that colour's low-end offset / bias until they don't.\n"
+                      + "Enter = next (the white check)     Esc = stop";
+                RectangleF ir = new RectangleF(W * 0.08f, y0 + ph + 2 * gap + H * 0.08f, W * 0.84f, H * 0.25f);
+                using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center })
+                using (SolidBrush ib = new SolidBrush(Color.FromArgb(210, 210, 210)))
+                    g.DrawString(ins, fi, ib, ir, sf);
+                if (warn != null)
+                {
+                    // the result, yellow on a dark box with a white outline
+                    RectangleF wr = new RectangleF(W * 0.08f, H * 0.84f, W * 0.84f, H * 0.11f);
+                    using (SolidBrush wb = new SolidBrush(Color.FromArgb(40, 40, 40))) g.FillRectangle(wb, wr);
+                    using (Pen wp = new Pen(Color.White, Math.Max(2, H / 540f))) g.DrawRectangle(wp, wr.X, wr.Y, wr.Width, wr.Height);
+                    using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                    using (SolidBrush yb = new SolidBrush(Color.FromArgb(255, 212, 0)))
+                        g.DrawString(warn, fi, yb, wr, sf);
+                }
+            }
+            return bm;
         }
 
         // 1.6: every auto-cal patch is a 10% window on black: full-screen bright
@@ -640,6 +743,7 @@ namespace ClipGuard
 
                 // 1. dimming off, then white by eye
                 if (!CalWait(Full("dimming", 40, 40, 40, "Turn the projector's laser dimming (DBLE / EBL) OFF, then press Enter.   Esc = stop"))) throw new OperationCanceledException();
+                CalLevelChecks();   // 2.88.6: black and white level checks, with instructions
                 if (!CalWait(Full("white_eye", 255, 255, 255, "Adjust the projector's white balance until this white window looks right to you, then press Enter.   Esc = stop"))) throw new OperationCanceledException();
                 Status("Reading your white...");
                 MReading w = CalRead("white", 255, 255, 255, 1.0, 3);
@@ -656,6 +760,7 @@ namespace ClipGuard
                 for (int r = 0; r <= 6; r++) for (int g = 0; g <= 6; g++) for (int b = 0; b <= 6; b++)
                     add((int)Math.Round(r * 42.5), (int)Math.Round(g * 42.5), (int)Math.Round(b * 42.5));
                 List<double[]> xyz = new List<double[]>();
+                int failRun = 0;   // 2.88.4: failed patches in a row
                 DateTime t0 = DateTime.Now;
                 for (int i = 0; i < pts.Count; i++)
                 {
@@ -665,7 +770,12 @@ namespace ClipGuard
                     MReading m = CalRead("p" + i, pts[i][0], pts[i][1], pts[i][2], 0.5, grey ? 3 : 1);   // greys: 3 readings averaged
                     if (!m.Ok) m = CalRead("p" + i + "_again", pts[i][0], pts[i][1], pts[i][2], 0.5, 1);
                     xyz.Add(m.Ok ? new double[] { m.X, m.Y, m.Z } : null);
+                    // 2.88.4: the meter stopped answering: stop, never build from part of the readings
+                    if (!m.Ok && ++failRun >= 3) throw new CalStop("Stopped at patch " + (i + 1) + " of " + pts.Count + ": the meter stopped answering (" + (m.Error ?? "no reading") + "). Nothing was changed. Unplug the meter, plug it into a back USB port and press C to check it.");
+                    if (m.Ok) failRun = 0;
                 }
+                int nMiss = 0; foreach (double[] x in xyz) if (x == null) nMiss++;
+                if (nMiss > pts.Count / 50) throw new CalStop("Stopped: " + nMiss + " of " + pts.Count + " patches had no reading, too many for a good LUT. Nothing was changed. Press C to check the meter, then run it again.");
 
                 // 3. build: .ti3 -> colprof -> collink -> .cube
                 Status("Building the LUT (a minute or two)...");
@@ -695,12 +805,13 @@ namespace ClipGuard
                 // Black and the darkest steps stay as the projector makes them: the
                 // correction fades in from about 2% to 25% (by the brightest channel).
                 string cubeFinal = Path.Combine(work, "final.cube");
-                Cube.BlendDark(cubeWork, cubeFinal, 0.02, 0.25);
+                Cube.BlendDark(cubeWork, cubeFinal, 0.02, 0.25, 0.80, 1.0);   // 2.88.7: and the gamut edge kept native
                 cubeWork = cubeFinal;
                 Cube cube = Cube.Load(cubeWork);
 
                 // 4. check: before (raw) and after (through the LUT, as the renderer applies it)
                 List<CalPatch> chk = CalCheckPatches();
+                int chkFail = 0;   // 2.88.4
                 for (int i = 0; i < chk.Count; i++)
                 {
                     CalPatch p = chk[i];
@@ -709,6 +820,8 @@ namespace ClipGuard
                     double[] o = cube.Apply(p.R / 255.0, p.G / 255.0, p.B / 255.0);
                     int ar = (int)Math.Round(Math.Max(0, Math.Min(1, o[0])) * 255), ag = (int)Math.Round(Math.Max(0, Math.Min(1, o[1])) * 255), ab = (int)Math.Round(Math.Max(0, Math.Min(1, o[2])) * 255);
                     MReading a0 = CalRead("chk_lut_" + p.Name, ar, ag, ab, 0.5, 3);
+                    if (!b0.Ok && !a0.Ok && ++chkFail >= 3) throw new CalStop("Stopped during the check: the meter stopped answering (" + (a0.Error ?? "no reading") + "). The LUT was built but not installed; nothing was changed. Press C to check the meter, then run it again.");
+                    if (b0.Ok || a0.Ok) chkFail = 0;
                     if (b0.Ok) { p.Before = new double[] { b0.X, b0.Y, b0.Z }; p.DeBefore = CalDe(p.Before, W, p.R, p.G, p.B, yBlack); }
                     if (a0.Ok) { p.After = new double[] { a0.X, a0.Y, a0.Z }; p.DeAfter = CalDe(p.After, W, p.R, p.G, p.B, yBlack); }
                 }
@@ -719,6 +832,7 @@ namespace ClipGuard
                     if (p.After != null) { sumA += p.DeAfter; maxA = Math.Max(maxA, p.DeAfter); na++; }
                 }
                 double avgB = sumB / Math.Max(1, nb), avgA = sumA / Math.Max(1, na);
+                if (na < chk.Count * 3 / 4) throw new CalStop("Stopped: only " + na + " of " + chk.Count + " check patches were read, so the LUT can't be checked. It was not installed; nothing was changed. Press C to check the meter, then run it again.");   // 2.88.4
 
                 // 5. install for the renderer: <file>.cube + <file>.txt next to clipguard.ini
                 // The renderer runs from ClipGuard's working copy of Unplugged
@@ -891,7 +1005,7 @@ namespace ClipGuard
             p.Text(L, y + 16, 9, string.Format(CultureInfo.InvariantCulture, "Peak white {0:0.0} nits (10% window)   |   black {1:0.000} cd/m2   |   contrast {2:0}:1   |   x {3:0.0000}  y {4:0.0000}   (about {5:0} K)",
                 W[1], yBlack * W[1], yBlack > 0 ? 1 / yBlack : 0, xy[0], xy[1], Math.Round(Cal.Cct(W) / 50) * 50), false, ink);
             p.Text(L, y + 40, 11, "LUT", true, ink);
-            p.Text(L, y + 56, 9, CalFile() + ".cube   |   65 x 65 x 65   |   ArgyllCMS   |   black and near-black left native   |   loaded by ClipGuard for " + CalName(), false, ink);
+            p.Text(L, y + 56, 9, CalFile() + ".cube   |   65 x 65 x 65   |   ArgyllCMS   |   edge colours and near-black left native   |   loaded by ClipGuard for " + CalName(), false, ink);
             p.Line(L, 742, R, 742, Color.FromArgb(215, 215, 222), 1, false);
             p.Text(L, 756, 8, "Errors are against the target with your white as white, so white itself reads 0. Before = without the LUT, after = through it.   Run " + stamp, false, soft);
             p.Save(path);

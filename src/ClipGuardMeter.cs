@@ -108,6 +108,27 @@ namespace ClipGuard
 
         public Spotread(Stopwatch clock) { this.clock = clock; }
 
+        // 2.88.4: Esc / stop ends a reading that is waiting on the meter at once.
+        public static volatile bool Abort;
+
+        // 2.88.4: a spotread left over from a run that hung still has the meter open,
+        // so no new one can read; end any before starting.
+        public static int KillStale()
+        {
+            int n = 0;
+            try
+            {
+                foreach (Process p in Process.GetProcessesByName("spotread"))
+                {
+                    try { p.Kill(); p.WaitForExit(3000); n++; } catch (Exception) { }
+                    finally { p.Dispose(); }
+                }
+            }
+            catch (Exception) { }
+            if (n > 0) Thread.Sleep(1500);   // the meter is free again after a moment
+            return n;
+        }
+
         public static string Find(string iniPath)
         {
             // 2.66.0: the player's own ArgyllCMS copy first.
@@ -147,6 +168,7 @@ namespace ClipGuard
         public bool Start(out string error)
         {
             error = "";
+            KillStale();   // 2.88.4: a hung spotread from an earlier run holds the meter
             try
             {
                 ProcessStartInfo psi = new ProcessStartInfo(Exe, Args);
@@ -234,7 +256,8 @@ namespace ClipGuard
                     m.Ok = ParseXyz(x, m);
                     return m;
                 }
-                if (proc.HasExited) { m.Error = "spotread stopped"; return m; }
+                if (proc.HasExited) { m.Error = "spotread stopped: " + Head(s, 4); return m; }
+                if (Abort) { m.Error = "stopped"; return m; }
                 Thread.Sleep(5);
             }
             m.Error = "no answer";
@@ -254,12 +277,17 @@ namespace ClipGuard
                 psi.RedirectStandardError = true;
                 using (Process p = Process.Start(psi))
                 {
-                    string so = "";
+                    // 2.88.4: both outputs read on their own threads and a time limit on
+                    // the process itself (a hung spotread used to block here for ever)
+                    string so = "", se = "";
                     Thread t = new Thread(() => { try { so = p.StandardOutput.ReadToEnd(); } catch (Exception) { } });
+                    Thread te = new Thread(() => { try { se = p.StandardError.ReadToEnd(); } catch (Exception) { } });
                     t.IsBackground = true; t.Start();
-                    string se = p.StandardError.ReadToEnd();
-                    if (!p.WaitForExit(timeoutMs)) { try { p.Kill(); } catch (Exception) { } m.Error = "no answer"; return m; }
-                    t.Join(2000);
+                    te.IsBackground = true; te.Start();
+                    DateTime until = DateTime.Now.AddMilliseconds(timeoutMs);
+                    while (!p.HasExited && DateTime.Now < until && !Abort) Thread.Sleep(20);
+                    if (!p.HasExited) { try { p.Kill(); } catch (Exception) { } m.Error = Abort ? "stopped" : "no answer"; return m; }
+                    t.Join(2000); te.Join(2000);
                     m.T1 = clock.Elapsed.TotalSeconds;
                     Match x = XyzRx.Match(so + "\n" + se);
                     if (x.Success) m.Ok = ParseXyz(x, m);
@@ -300,7 +328,9 @@ namespace ClipGuard
         volatile MScene scene;
         volatile string status = "";
         volatile bool idle = true;
-        volatile bool cancel;
+        volatile bool cancelFlag;
+        // 2.88.4: stopping a run also stops a meter reading that is waiting
+        bool cancel { get { return cancelFlag; } set { cancelFlag = value; Spotread.Abort = value; } }
         string idleText = "";
         Thread worker;
         int screenIndex;
