@@ -21,10 +21,16 @@ through a capture card, with the same picture processing.
   24, 50, 59.94 Hz and so on).
 - **HDR to SDR tone mapping.** For projectors that look best with SDR, with picture
   settings organised in sections.
+- **ClipBee.** A picture enhancement that adds snap and depth: texture, outlines and
+  the separation of foreground from background, on brightness only, so colours stay
+  as they are. One setting, 0 to 100 (off by default, 25 recommended). Grain in flat
+  areas, near-black and highlights are left alone, and it adds no delay. While
+  watching, Down opens it and Left / Right change it.
 - **Projector calibration.** It builds a 3D LUT for any projector with a supported
   meter, with or without a colorimeter correction file (any .ccss in the Calibration
   folder). Black and white check screens come first, and colours the projector can't
-  reach keep its own most saturated colour instead of shifting hue.
+  reach keep its own most saturated colour instead of shifting hue. The white and
+  black it measures set the display levels for tone mapping when its LUT is in use.
 - **Video Processor.** It shows a capture card's HDMI input full screen, with
   ClipGuard and the picture settings applied. It needs an unencrypted HDMI signal (see
   below).
@@ -72,6 +78,7 @@ Settings and logs are kept in `%LOCALAPPDATA%\ClipGuard`.
 | F7 | ClipGuard menu |
 | F5 | Calibration LUT off / on |
 | A | Sound and subtitles |
+| Down | ClipBee, while watching (Left / Right change it, Down closes it) |
 | I | The film's bar (in a film); Info (in Video Processor) |
 | Alt+F4 | Close the player (or Power > Close ClipGuard Media Player) |
 

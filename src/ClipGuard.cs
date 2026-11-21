@@ -1,4 +1,4 @@
-// ClipGuard 2.53.0 launcher (formerly DBLEFix; no window; drives the
+﻿// ClipGuard 2.53.0 launcher (formerly DBLEFix; no window; drives the
 // renderer's on-screen overlay). Built three times from this file:
 //   ClipGuard       public, for any PC
 //   ClipGuard+      public, /define:PLUS: for higher-end PCs: adds High
@@ -493,6 +493,63 @@ namespace ClipGuard
         }
     }
 
+    // 2.92.0: the graphics card's output range (Full / Limited), as NVIDIA's control panel sets
+    // it, read through NVAPI's colour control for the display the player is on. 0 when there is
+    // no NVIDIA driver or it can't be read, so the banner says nothing rather than guess.
+    static class NvRange
+    {
+        [DllImport("nvapi64.dll", EntryPoint = "nvapi_QueryInterface", CallingConvention = CallingConvention.Cdecl)]
+        static extern IntPtr QueryInterface(uint id);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int InitFn();
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int IdByNameFn([MarshalAs(UnmanagedType.LPStr)] string name, out uint id);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int ColorFn(uint id, IntPtr data);
+        static bool tried, ok;
+        static IdByNameFn idByName;
+        static ColorFn color;
+
+        public static int Read()
+        {
+            try
+            {
+                if (!tried)
+                {
+                    tried = true;
+                    IntPtr pi = QueryInterface(0x0150E828), pn = QueryInterface(0xAE457190), pc = QueryInterface(0x92F9D80D);
+                    if (pi == IntPtr.Zero || pn == IntPtr.Zero || pc == IntPtr.Zero) return 0;
+                    if (((InitFn)Marshal.GetDelegateForFunctionPointer(pi, typeof(InitFn)))() != 0) return 0;
+                    idByName = (IdByNameFn)Marshal.GetDelegateForFunctionPointer(pn, typeof(IdByNameFn));
+                    color = (ColorFn)Marshal.GetDelegateForFunctionPointer(pc, typeof(ColorFn));
+                    ok = true;
+                }
+                if (!ok) return 0;
+                Screen sc = null;
+                try { IntPtr w = Native.GetForegroundWindow(); if (w != IntPtr.Zero) sc = Screen.FromHandle(w); } catch { }
+                if (sc == null) sc = Screen.PrimaryScreen;
+                uint id;
+                if (idByName(sc.DeviceName, out id) != 0) return 0;
+                // NV_COLOR_DATA v5 (24 bytes), then v4 (20): cmd 1 = get; data.dynamicRange at byte 10:
+                // 0 = VESA (full), 1 = CEA (limited)
+                foreach (int[] v in new[] { new[] { 5, 24 }, new[] { 4, 20 } })
+                {
+                    IntPtr buf = Marshal.AllocHGlobal(32);
+                    try
+                    {
+                        for (int i = 0; i < 32; i++) Marshal.WriteByte(buf, i, 0);
+                        Marshal.WriteInt32(buf, 0, v[1] | (v[0] << 16));
+                        Marshal.WriteInt16(buf, 4, (short)v[1]);
+                        Marshal.WriteByte(buf, 6, 1);
+                        if (color(id, buf) != 0) continue;
+                        int dr = Marshal.ReadByte(buf, 10);
+                        return dr == 0 ? 1 : dr == 1 ? 2 : 0;
+                    }
+                    finally { Marshal.FreeHGlobal(buf); }
+                }
+            }
+            catch (Exception) { ok = false; }
+            return 0;
+        }
+    }
+
     // ---- shared memory with the renderer --------------------------------------
     // Mirrors ClipGuardShared in ClipGuard.h (Pack = 4, 256 bytes). Offsets in bytes.
 
@@ -503,7 +560,7 @@ namespace ClipGuard
             OOverlayOn = 28, OPinned = 32, OSelected = 36, OLastKey = 40, OExeTick = 44,
             ORendTick = 48, OPicture = 52, OSceneNits = 56, OAmount = 60, OCeiling = 64, OKneeEff = 68,
             OOutputPQ = 72, OSrcMax = 76, OClipFrac = 80, OBottomBar = 84, OColorProtect = 88, OFullPct = 92, OTextSkip = 96, OHotSpot = 108, OFixShape = 120, OGrid = 128, OLookAhead = 132,
-            OLogRequest = 136, OLogDone = 140, OLogState = 144, OLogStateTick = 148, OHotBelow = 152, OGradedSpot = 156, OBuildKind = 160, OTestMarker = 164, OSpotMask = 168, OInfo = 172, OGpuLoad = 176, ODimFire = 180, OUpscaler = 184, OEdition = 188, OKscape = 192, ODither = 196, OProjector = 200, OLutOff = 204, OLut = 208, OSource = 212, OSsr = 216, OFel = 220, OOutGamma = 224, ODoviEl = 228;
+            OLogRequest = 136, OLogDone = 140, OLogState = 144, OLogStateTick = 148, OHotBelow = 152, OGradedSpot = 156, OBuildKind = 160, OTestMarker = 164, OSpotMask = 168, OInfo = 172, OGpuLoad = 176, ODimFire = 180, OUpscaler = 184, OEdition = 188, OKscape = 192, ODither = 196, OProjector = 200, OLutOff = 204, OLut = 208, OSource = 212, OSsr = 216, OFel = 220, OOutGamma = 224, ODoviEl = 228, OOutRange = 232, ODepthDetail = 236, ODepthEdges = 240, ODepthWide = 244, ODepthView = 248;
 
         readonly MemoryMappedFile map;
         readonly MemoryMappedViewAccessor view;
@@ -533,6 +590,11 @@ namespace ClipGuard
             view.Write(OUpscaler, Edition.Plus ? s.Upscaler : 0);
             view.Write(OSsr, Edition.Plus ? s.Ssr : 0);   // 2.85.0: SSimSuperRes
             view.Write(OOutGamma, s.OutGamma);           // 2.88.1: 0 = 2.2, 1 = 2.4, 2 = BT.1886
+            // 2.94.0: one Depth level sets the renderer's three layers: Detail and Edges at it, the wide one at half
+            view.Write(ODepthDetail, s.DepthLevel);
+            view.Write(ODepthEdges, s.DepthLevel);
+            view.Write(ODepthWide, s.DepthLevel / 2);
+            view.Write(ODepthView, 0);
             view.Write(OEdition, Edition.Plus ? 1 : 0);
             // 1 = Kaleidescape (ClipGuard+); 2.64.1 (Player): 2 = Video Processor, 3 = Media Player.
             view.Write(OKscape, s.PlayerSource == 2 ? 2 : (s.PlayerSource == 1 ? 3 : (s.KscapeActive ? 1 : 0)));
@@ -561,6 +623,7 @@ namespace ClipGuard
         public void Heartbeat() { view.Write(OExeTick, (uint)Environment.TickCount); }
         // Info banner: the graphics card's load in % + 1 (0 = not known).
         public void SetGpuLoad(float v) { view.Write(OGpuLoad, v); }
+        public void SetOutRange(int v) { view.Write(OOutRange, v); }   // 2.92.0: 0 not known, 1 RGB Full, 2 RGB Limited
 
         // Log (F11): 0 none, 1 saving, 2 sending, 3 sent, 4 failed, 5 no token.
         public void RequestLog(uint id) { view.Write(OLogRequest, id); }
@@ -693,6 +756,7 @@ namespace ClipGuard
         public int Upscaler = 0;          // Upscaler: 0 = Normal, 1 = FSRCNNX, 2 = ArtCNN C4F32 (2.85.0) (neural 2x for 1080p on a 4K screen)
         public int Ssr = 0;               // 2.85.0: SSimSuperRes after scaling (1 = on)
         public int OutGamma = 0;          // 2.88.1: the projector's gamma: 0 = 2.2 (Unplugged's), 1 = 2.4, 2 = BT.1886
+        public int DepthLevel = 0;        // 2.94.0: Depth 0-100 (0 = off, micro contrast back); 2.95.0: named ClipBee, off by default (25 recommended)
         public int Dither = 0;            // Dither: 0 = Static, 1 = Temporal (the pattern moves every frame) (2.45.0)
         public bool LutOff = false;       // 2.48.2: F5, calibration LUT off for comparing (not saved: always starts on)
         public int Projector = 0;         // Projector: 0 = Universal (Reactive), 1 = Titan Noir Max DBLE High (Predictive) (2.46.0), 3 = DBLE Low (2.60.0); Valerion (2) removed in 2.51.2
@@ -750,6 +814,7 @@ namespace ClipGuard
             s.Upscaler = Edition.Plus ? (int)Clamp(Math.Round(Read(ini, "Upscaler", 0)), 0, 2) : 0;
             s.Ssr = Edition.Plus ? (int)Clamp(Math.Round(Read(ini, "SSimSuperRes", 0)), 0, 1) : 0;
             s.OutGamma = (int)Clamp(Math.Round(Read(ini, "OutputGamma", 0)), 0, 2);
+            s.DepthLevel = (int)Clamp(Math.Round(Read(ini, "ClipBee", 0)), 0, 100);   // 2.95.0 (was "Depth")
             s.HotSpotLast = Clamp(Read(ini, "HotSpotLast", s.HotSpot > 0.0 ? s.HotSpot : 0.6), 0.05, 1.0);
             s.Grid = (int)Clamp(Read(ini, "Grid", 1), 0, 1);
             s.LookAhead = NormLookAhead((int)Math.Round(Read(ini, "LookAhead", 4)));
@@ -792,6 +857,7 @@ namespace ClipGuard
             W(ini, "HotSpotMask", SpotMask.ToString(CultureInfo.InvariantCulture));
             W(ini, "DimFire", DimFire ? "1" : "0");
             W(ini, "OutputGamma", OutGamma.ToString(CultureInfo.InvariantCulture));
+            W(ini, "ClipBee", DepthLevel.ToString(CultureInfo.InvariantCulture));   // 2.95.0
             if (Edition.Plus)
             {
                 W(ini, "Upscaler", Upscaler.ToString(CultureInfo.InvariantCulture));
@@ -956,7 +1022,7 @@ namespace ClipGuard
         // With more than one card, the busiest one.
         System.Threading.Timer gpuTimer;
         Dictionary<string, CounterSample> gpuPrev = new Dictionary<string, CounterSample>();
-        int gpuBusy;
+        int gpuBusy, rangeN;
         void GpuSample(object unused)
         {
             if (Interlocked.Exchange(ref gpuBusy, 1) != 0) return;
@@ -988,6 +1054,8 @@ namespace ClipGuard
                     sums.TryGetValue(card, out t);
                     sums[card] = t + v;
                 }
+                // 2.92.0: the HDMI range the NVIDIA driver sends, every 2 s while the banner shows
+                if (++rangeN % 4 == 1) { try { shared.SetOutRange(NvRange.Read()); } catch { } }
                 bool had = gpuPrev.Count > 0;
                 gpuPrev = cur;
                 if (!had) return;   // the first reading has nothing to compare with
@@ -1561,6 +1629,9 @@ namespace ClipGuard
         public void SetSsr(bool on) { int v = on ? 1 : 0; if (s.Ssr != v) { s.Ssr = v; Changed(); } }
         public int OutGamma() { return s.OutGamma; }   // 2.88.1
         public void SetOutGamma(int v) { v = Math.Max(0, Math.Min(2, v)); if (s.OutGamma != v) { s.OutGamma = v; Changed(); } }
+        // 2.94.0: Depth, one level 0-100
+        public int DepthLevel() { return s.DepthLevel; }
+        public void SetDepthLevel(int v) { v = Math.Max(0, Math.Min(100, v)); if (s.DepthLevel != v) { s.DepthLevel = v; Changed(); } }
 #endif
 
         public void MediaClosed()

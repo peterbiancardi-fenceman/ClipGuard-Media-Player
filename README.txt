@@ -11,7 +11,8 @@ https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player
 Keys: Arrows / Enter move and select, Esc or Backspace back, F4 Video Processor (in
 the library) or back to the library (while watching), F6 ClipGuard's banner, F7
 ClipGuard menu, F5 calibration LUT off / on, A sound and subtitles, I the film's bar
-or info, Alt+F4 (or Power > Close) close the player.
+or info, Down ClipBee while watching (Left / Right change it), Alt+F4 (or Power >
+Close) close the player.
 
 Mouse: point to select, click to open, right-click back, the wheel moves up and down.
 While watching, a click is Play / Pause and a right-click is back.

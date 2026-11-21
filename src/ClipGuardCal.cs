@@ -1,4 +1,4 @@
-// ClipGuard Meter auto-cal (2.48.0, ClipGuard Test package only).
+﻿// ClipGuard Meter auto-cal (2.48.0, ClipGuard Test package only).
 //
 // L = auto-cal (after aiming). Pick the projector, gamma and colour space;
 // set white by eye; the meter reads the native white and a few hundred
@@ -845,8 +845,10 @@ namespace ClipGuard
                 File.Copy(cubeWork, Path.Combine(live, file + ".cube"), true);
                 File.Copy(cubeWork, Path.Combine(iniDir, file + ".cube"), true);
                 string desc = string.Format(CultureInfo.InvariantCulture, "{0}, {1} {2}, dE {3:0.0}, {4}", CalShortName(), CalSpaceNames[calSpace], CalGammaNames[calGamma], avgA, DateTime.Now.ToString("d MMM", CultureInfo.InvariantCulture));
-                File.WriteAllText(Path.Combine(live, file + ".txt"), desc + "\n");
-                File.WriteAllText(Path.Combine(iniDir, file + ".txt"), desc + "\n");
+                // 2.91.0: the measured white and black too, so the player can set its display levels from the LUT
+                string levels = string.Format(CultureInfo.InvariantCulture, "white_nits={0:0.0}\nblack_nits={1:0.0000}\n", W[1], yBlack * W[1]);
+                File.WriteAllText(Path.Combine(live, file + ".txt"), desc + "\n" + levels);
+                File.WriteAllText(Path.Combine(iniDir, file + ".txt"), desc + "\n" + levels);
 
                 // 6. report
                 pdfPath = Path.Combine(iniDir, "clipguard_" + file + "_" + DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + ".pdf");

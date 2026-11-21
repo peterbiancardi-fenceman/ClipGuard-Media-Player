@@ -1,4 +1,4 @@
-// ClipGuard Media Player (2.52.0, ClipGuard Test package only).
+﻿// ClipGuard Media Player (2.52.0, ClipGuard Test package only).
 //
 // Browses the Plex libraries (all servers of the account, or one) and plays a
 // film in Unplugged (with ClipGuard) through the Plex server: direct play of the
@@ -404,7 +404,7 @@ namespace ClipGuard
                 }
                 vs.Add(v);
             }
-            int keep = mv.Versions.Count == vs.Count ? mv.VerIdx : 0;
+            int keep = mv.Versions.Count == vs.Count ? mv.VerIdx : LastVer(mv, vs);   // 2.92.0: else the version played last
             mv.Versions = vs;
             mv.VerIdx = Math.Max(0, Math.Min(vs.Count - 1, keep));
             if (streams) mv.Detailed = true;
@@ -421,6 +421,47 @@ namespace ClipGuard
             mv.Chapters = cs;
             foreach (object im in Arr(m, "Image"))
                 if (Str(im, "type") == "clearLogo" && Str(im, "url").Length > 0) { mv.Logo = Str(im, "url"); break; }
+        }
+
+        // 2.92.0: the version of a film played last (by its file's part key), so a film with
+        // more than one version opens and resumes on that one. Kept in lastver.txt.
+        static Dictionary<string, string> lastVer;
+        static string LastVerPath { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipGuard", "MediaPlayer", "lastver.txt"); } }
+        static void LoadLastVer()
+        {
+            if (lastVer != null) return;
+            lastVer = new Dictionary<string, string>();
+            try { foreach (string l in File.ReadAllLines(LastVerPath)) { string[] f = l.Split('\t'); if (f.Length == 2) lastVer[f[0]] = f[1]; } } catch (Exception) { }
+        }
+        static int LastVer(Movie mv, List<Ver> vs)
+        {
+            if (vs.Count < 2 || mv.Srv == null) return 0;
+            string pk;
+            lock (typeof(Plex))
+            {
+                LoadLastVer();
+                if (!lastVer.TryGetValue(mv.Srv.Id + ":" + mv.Key, out pk)) return 0;
+            }
+            for (int i = 0; i < vs.Count; i++) if (vs[i].PartKey == pk) return i;
+            return 0;   // that version is gone: the first
+        }
+        public static void RememberVer(Movie mv, Ver v)
+        {
+            if (mv == null || v == null || mv.Srv == null || mv.Versions.Count < 2 || v.PartKey.Length == 0) return;
+            lock (typeof(Plex))
+            {
+                LoadLastVer();
+                string k = mv.Srv.Id + ":" + mv.Key, old;
+                if (lastVer.TryGetValue(k, out old) && old == v.PartKey) return;
+                lastVer[k] = v.PartKey;
+                try
+                {
+                    List<string> lines = new List<string>();
+                    foreach (KeyValuePair<string, string> kv in lastVer) lines.Add(kv.Key + "\t" + kv.Value);
+                    File.WriteAllLines(LastVerPath, lines.ToArray());
+                }
+                catch (Exception) { }
+            }
         }
 
         // The chosen version's badges and file.
@@ -483,6 +524,8 @@ namespace ClipGuard
             void SetSsr(bool on);
             int OutGamma();                   // 2.88.1: 0 = 2.2, 1 = 2.4, 2 = BT.1886
             void SetOutGamma(int v);
+            int DepthLevel();                 // 2.94.0: Depth 0-100 (0 off)
+            void SetDepthLevel(int v);
             bool KscapeReady();               // 2.74.0: a Kaleidescape answers on the network
             int KscapeMode();                 // its play mode (2 = playing)
             void KscapeSend(string command);  // a control-protocol command (UP, SELECT, PLAY ...)
@@ -3717,6 +3760,7 @@ namespace ClipGuard
                 else if (key == "!frm") SetIni("MatchFrameRate", FrmOn() ? "0" : "1");
                 else if (key == "!ssr") { if (PHost != null) PHost.SetSsr(!PHost.Ssr()); }   // 2.85.0
                 else if (key == "!gamma") { if (PHost != null) PHost.SetOutGamma((PHost.OutGamma() + (dir < 0 ? 2 : 1)) % 3); }   // 2.88.1
+                else if (key == "!depth") { if (PHost != null) PHost.SetDepthLevel(PHost.DepthLevel() + dir * 5); }   // 2.94.0
                 else if (key == "!calrun") { if (k == Keys.Enter) CalBegin(); }
                 else if (key == "!lut") LutStep(dir);
                 else if (key == "!caldir") { }
@@ -3749,6 +3793,7 @@ namespace ClipGuard
             if (key == "!frm") return FrmOn() ? "On" : "Off";
             if (key == "!ssr") return PHost != null && PHost.Ssr() ? "On" : "Off";   // 2.85.0
             if (key == "!gamma") return PHost == null ? "2.2" : new[] { "2.2", "2.4", "BT.1886" }[Math.Max(0, Math.Min(2, PHost.OutGamma()))];   // 2.88.1
+            if (key == "!depth") return PHost == null ? "-" : (PHost.DepthLevel() == 0 ? "Off" : PHost.DepthLevel().ToString(CultureInfo.InvariantCulture));   // 2.94.0
             if (key == "!copy") return "Press Enter";
             if (key == "!calrun") return "Press Enter";
             if (key == "!lut") return LutName(UnpluggedSettings.LutFile());
@@ -4442,6 +4487,8 @@ namespace ClipGuard
             seekTarget = -1;
             curUrl = file;
             curVer = m != null && m.Versions.Count > 0 ? m.Versions[Math.Max(0, Math.Min(m.Versions.Count - 1, m.VerIdx))] : null;
+            Plex.RememberVer(m, curVer);   // 2.92.0: next time it opens on this version
+            depthOpen = false;   // 2.94.0
             // 2.57.0: start on the sound and subtitles Plex has chosen for this film.
             audioCur = PlexTrack(curVer == null ? null : curVer.Audios);
             subCur = PlexTrack(curVer == null ? null : curVer.Subs);
@@ -4636,6 +4683,41 @@ namespace ClipGuard
         string msgText = "";
         DateTime msgUntil = DateTime.MinValue, barUntil = DateTime.MinValue;
 
+        // 2.94.0: Depth while watching: Down opens a bar, Left / Right change it in steps of 5
+        // (a paused frame is redrawn at once), Down / Back / Enter close it. 8 s untouched closes it.
+        bool depthOpen;
+        DateTime depthUntil;
+        void DepthOpen()
+        {
+            if (PHost == null) return;
+            depthOpen = true;
+            DepthShow();
+        }
+        void DepthShow()
+        {
+            depthUntil = DateTime.Now.AddSeconds(8);
+            msgUntil = DateTime.MinValue;
+            Kick();
+        }
+        bool DepthKey(Keys k)
+        {
+            if (k == Keys.Left || k == Keys.Right)
+            {
+                PHost.SetDepthLevel(PHost.DepthLevel() + (k == Keys.Right ? 5 : -5));
+                if (paused) UnpluggedSettings.Redraw();   // a paused frame is only redrawn when asked
+                DepthShow();
+                return true;
+            }
+            if (k == Keys.Down || k == Keys.Up || k == Keys.Enter || k == Keys.Escape || k == Keys.Back || k == Keys.BrowserBack)
+            {
+                depthOpen = false;   // 2.95.1: closes without a message
+                Kick();
+                return true;
+            }
+            depthOpen = false;   // any other key closes it and does what it does
+            return PlayerKey(k, false, false);
+        }
+
         void Say(string text) { Say(text, 2500); }
         void Say(string text, int ms)
         {
@@ -4656,7 +4738,7 @@ namespace ClipGuard
 
         bool PreviewOn() { return seekTarget >= 0 && DateTime.Now < seekHold; }
         bool BarOn() { return !lipSync && playing != null && (DateTime.Now < barUntil || paused || PreviewOn()); }
-        bool OverlayWanted() { return player != null && (DateTime.Now < msgUntil || VolumeOn() || xmcMenu || BarOn() || menuOpen || (capturing && DateTime.Now < capUntil)); }
+        bool OverlayWanted() { return player != null && ((depthOpen && DateTime.Now < depthUntil) || DateTime.Now < msgUntil || VolumeOn() || xmcMenu || BarOn() || menuOpen || (capturing && DateTime.Now < capUntil)); }
 
         long PosMs() { return PreviewOn() ? seekTarget / 10000 : Math.Max(0, lastPos); }
         long DurMs() { return Math.Max(lastDur, playing != null ? playing.Duration : 0); }
@@ -4670,6 +4752,8 @@ namespace ClipGuard
             { PHost.KscapeSend(k == Keys.Right ? "SCAN_FORWARD" : "SCAN_REVERSE"); return true; }   // 2.74.0: skip buttons
             if (capturing) return CaptureKey(k, ctrl);
             if (menuOpen) return MenuKey(k);
+            if (depthOpen && DateTime.Now > depthUntil) depthOpen = false;   // 2.94.0: closed itself after a while
+            if (depthOpen && !ctrl) return DepthKey(k);
             if (lipSync)
             {
                 if (k == Keys.Left || k == Keys.Right)
@@ -4714,7 +4798,8 @@ namespace ClipGuard
                         Skip(dir * (shift ? 60 : 10));
                         return true;
                     }
-                case Keys.Up: case Keys.Down: return true;   // 2.80.0: free (2.82.0: Up no longer shows the banner)
+                case Keys.Down: DepthOpen(); return true;   // 2.94.0: the Depth bar
+                case Keys.Up: return true;
                 case Keys.PageUp: case Keys.MediaPreviousTrack: ChapterJump(-1); return true;
                 case Keys.PageDown: case Keys.MediaNextTrack: ChapterJump(1); return true;
                 case Keys.Home: SeekTo(0); return true;
@@ -4821,8 +4906,18 @@ namespace ClipGuard
         }
 
         // Chapters from Plex (with names and pictures); the file's own marks otherwise.
+        // 2.93.1: one press of a remote's Skip button can arrive twice (as a key and as a
+        // "next track" command): a second jump the same way within 0.4 s is that, and is
+        // dropped. A press soon after a jump counts from where that jump went, not from
+        // where the picture still is while the seek lands.
+        DateTime chapLast = DateTime.MinValue;
+        int chapLastDir;
+        long chapLastTarget = -1;
         void ChapterJump(int dir)
         {
+            double since = (DateTime.Now - chapLast).TotalMilliseconds;
+            if (dir == chapLastDir && since < 400) return;
+            chapLast = DateTime.Now; chapLastDir = dir;
             Movie m = playing;
             if (m == null || m.Chapters.Count < 2)
             {
@@ -4832,6 +4927,7 @@ namespace ClipGuard
                 return;
             }
             long pos = PosMs();
+            if (chapLastTarget >= 0 && since < 2500) pos = chapLastTarget + 3500;   // the last jump's chapter, as if just past its start
             int ci = ChapterAt(m, pos);
             long target;
             if (dir > 0)
@@ -4839,7 +4935,9 @@ namespace ClipGuard
                 if (ci + 1 >= m.Chapters.Count) { Say("Last chapter", 1500); return; }
                 target = m.Chapters[ci + 1].Start;
             }
+            else if (chapLastTarget >= 0 && since < 2500) target = ci > 0 ? m.Chapters[ci - 1].Start : 0;   // pressed again: one more back
             else target = (ci >= 0 && pos - m.Chapters[ci].Start > 3000) ? m.Chapters[ci].Start : (ci > 0 ? m.Chapters[ci - 1].Start : 0);
+            chapLastTarget = target;
             SeekTo(target * 10000L);
         }
 
@@ -5144,6 +5242,7 @@ namespace ClipGuard
                 if (BarOn()) DrawBar(g, W);
                 if (menuOpen) DrawMenu(g, W);
                 if (DateTime.Now < msgUntil) DrawMsg(g, W);
+                if (depthOpen && DateTime.Now < depthUntil && PHost != null) DrawBeeBar(g, W);   // 2.95.0
                 if (capturing && DateTime.Now < capUntil) DrawCapCard(g, W);
                 if (xmcMenu) DrawXmcMenuCard(g, W);   // 2.86.2
                 DrawVolume(g, W);   // 2.81.0
@@ -5282,6 +5381,93 @@ namespace ClipGuard
             }
             if (n == 0) Txt(g, "No tracks found yet", 26, false, Grey, mx + 78, my + 116);
             Txt(g, menuOnTabs ? "Left / Right: Sound / Subtitles    Down: the list    Back: close" : "Up / Down: choose    Enter: use    Up at the top: Sound / Subtitles    Back: close", 20, false, Grey, mx + 40, my + mh - 50);
+        }
+
+        // 2.95.0: the ClipBee logo: a bee in a yellow honeycomb cell with a white edge (h = its height)
+        static readonly Color BeeYellow = Color.FromArgb(255, 198, 26), BeeInk = Color.FromArgb(21, 20, 23), BarRed = Color.FromArgb(232, 32, 42);
+        internal static void DrawBee(Graphics g, float x, float y, float h)
+        {
+            float R = h / 2, cx = x + 0.866f * R, cy = y + R;
+            Func<float, PointF[]> hex = delegate(float r)
+            {
+                PointF[] p = new PointF[6];
+                for (int i = 0; i < 6; i++) { double a = Math.PI / 180 * (60 * i - 90); p[i] = new PointF(cx + r * (float)Math.Cos(a), cy + r * (float)Math.Sin(a)); }
+                return p;
+            };
+            using (SolidBrush w = new SolidBrush(Color.White)) g.FillPolygon(w, hex(R));
+            using (SolidBrush yb = new SolidBrush(BeeYellow)) g.FillPolygon(yb, hex(R * 0.84f));
+            using (SolidBrush w = new SolidBrush(Color.White))
+            {
+                g.FillEllipse(w, cx - R * 0.66f, cy - R * 0.56f, R * 0.56f, R * 0.38f);
+                g.FillEllipse(w, cx + R * 0.10f, cy - R * 0.56f, R * 0.56f, R * 0.38f);
+            }
+            using (SolidBrush k = new SolidBrush(BeeInk))
+            {
+                g.FillEllipse(k, cx - R * 0.30f, cy - R * 0.22f, R * 0.60f, R * 0.92f);
+                g.FillEllipse(k, cx - R * 0.15f, cy - R * 0.50f, R * 0.30f, R * 0.30f);
+            }
+            using (SolidBrush yb = new SolidBrush(BeeYellow))
+            {
+                g.FillRectangle(yb, cx - R * 0.34f, cy + R * 0.06f, R * 0.68f, R * 0.11f);
+                g.FillRectangle(yb, cx - R * 0.34f, cy + R * 0.30f, R * 0.68f, R * 0.11f);
+            }
+        }
+
+        // 2.95.0: the ClipBee bar while watching, in the info banner's look: a dark panel along
+        // the top with a red line under it, the logo, a red heading, the level in a white-edged
+        // badge, a yellow track with 25 marked as recommended, and the keys.
+        // 2.95.1: half size, centred at the top (drawn at full size into a half-size transform)
+        void DrawBeeBar(Graphics g, float W)
+        {
+            const float BW = 1880, Scale = 0.5f;
+            GraphicsState st = g.Save();
+            try
+            {
+                g.TranslateTransform((W - BW * Scale) / 2, 0);
+                g.ScaleTransform(Scale, Scale);
+                DrawBeeBarFull(g, BW);
+            }
+            finally { g.Restore(st); }
+        }
+        void DrawBeeBarFull(Graphics g, float W)
+        {
+            int v = PHost.DepthLevel();
+            const float H = 150;
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(21, 20, 23))) g.FillRectangle(b, 0, 0, W, H);
+            using (SolidBrush b = new SolidBrush(BarRed)) g.FillRectangle(b, 0, H - 5, W, 5);
+            float x = 56;
+            DrawBee(g, x, 30, 86);
+            x += 100 + 30;
+            using (SolidBrush b = new SolidBrush(BarRed)) g.FillPolygon(b, new[] { new PointF(x, 60), new PointF(x + 14, 70), new PointF(x, 80) });
+            Txt(g, "CLIPBEE", 30, true, BarRed, x + 24, 49);
+            x += 24 + 170;
+            // the level, in a badge like the banner's
+            string vt = v == 0 ? "Off" : v.ToString(CultureInfo.InvariantCulture);
+            RectangleF bd = new RectangleF(x, 34, 130, 76);
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(74, 79, 92))) g.FillRectangle(b, bd);
+            using (Pen p = new Pen(Color.White, 4)) g.DrawRectangle(p, bd.X, bd.Y, bd.Width, bd.Height);
+            using (Font f = F(44, true)) using (SolidBrush b = new SolidBrush(Color.White)) using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                g.DrawString(vt, f, b, bd, sf);
+            x += 130 + 50;
+            // the track
+            float tw = Math.Max(300, W - x - 560), ty = 62, th = 20;
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(45, 46, 53))) g.FillRectangle(b, x, ty, tw, th);
+            using (SolidBrush b = new SolidBrush(BeeYellow)) g.FillRectangle(b, x, ty, tw * v / 100f, th);
+            using (Pen p = new Pen(Color.White, 3)) g.DrawRectangle(p, x, ty, tw, th);
+            float kx = x + tw * v / 100f;
+            using (SolidBrush b = new SolidBrush(Color.White)) g.FillEllipse(b, kx - 18, ty + th / 2 - 18, 36, 36);
+            using (SolidBrush b = new SolidBrush(BeeInk)) g.FillEllipse(b, kx - 11, ty + th / 2 - 11, 22, 22);
+            using (SolidBrush b = new SolidBrush(Color.White)) g.FillEllipse(b, kx - 8, ty + th / 2 - 8, 16, 16);
+            // marks under it: Off, 25 recommended, 50, 100
+            float rx = x + tw * 0.25f;
+            using (SolidBrush b = new SolidBrush(BeeYellow)) g.FillPolygon(b, new[] { new PointF(rx, ty + th + 6), new PointF(rx - 9, ty + th + 18), new PointF(rx + 9, ty + th + 18) });
+            Txt(g, "Off", 20, false, Grey, x - 4, ty + th + 14);
+            Txt(g, "25 recommended", 20, true, BeeYellow, rx - 70, ty + th + 20);
+            Txt(g, "50", 20, false, Grey, x + tw * 0.5f - 12, ty + th + 14);
+            Txt(g, "100", 20, false, Grey, x + tw - 34, ty + th + 14);
+            x += tw + 50;
+            Txt(g, "\u25c0 \u25b6  adjust", 28, true, Color.White, x, 52);
+            Txt(g, "Down closes", 28, true, Color.White, x + 230, 52);
         }
 
         void DrawMsg(Graphics g, float W)
@@ -5427,6 +5613,7 @@ namespace ClipGuard
                 { Grp = grp; Kind = kind; Key = key; Mn = mn; Mx = mx; Val = val; On = on; Opt = opt; NOpts = nopts; OptVals = optvals; NoEng = noeng; }
                 public R Copy() { return (R)MemberwiseClone(); }
                 public string File = "";
+                public bool FromLut;   // 2.91.0: the value comes from the LUT's measured levels
             }
 
             static readonly R[] Rows = {
@@ -5551,6 +5738,7 @@ namespace ClipGuard
             new R(4,3,"__capFrame",0.0,0.0,0.0,false,0,0,null,1),
             new R(4,4,"out.cubeLut",0.0,0.0,0.0,false,0,0,null,0),
             new R(4,2,"out.cubeLutMode",0.0,0.0,0.0,false,3,4,null,0),
+            new R(4,2,"out.lutLevels",0.0,0.0,0.0,false,0,2,null,1),
             new R(5,0,"sys.trayIcon",0.0,0.0,0.0,false,0,0,null,0),
             new R(5,0,"sys.updateCheck",0.0,0.0,0.0,true,0,0,null,1),
             new R(5,3,"sys.updateNow",0.0,0.0,0.0,false,0,0,null,1),
@@ -5731,6 +5919,7 @@ namespace ClipGuard
                 new PRow(S_ZION, "zion.personEnabled", "Person skin", null, 0, "", "Person skin on or off."),
                 new PRow(S_ZION, "zion.personStrength", "Person skin strength", null, 0.01, "", "Person skin strength."),
                 new PRow(S_ZION, "zion.skinPreserve", "Skin tone preserve", null, 0.01, "", "Person skin: tone preserve."),
+                new PRow(S_ENH, "!depth", "ClipBee", null, 0, "", "Adds snap and depth: texture, outlines and the separation of foreground from background, on brightness only (0-100, 0 is off, 25 recommended). Grain in flat areas, near-black and highlights are left alone. While watching: Down opens it, Left / Right change it. With ClipBee on, Unplugged's micro contrast is turned off."),
                 new PRow(S_ENH, "postfx.sharpen", "Adaptive sharpen", null, 0, "", "Adaptive sharpening on or off."),
                 new PRow(S_ENH, "postfx.sharpenStr", "Sharpen strength", null, 0.01, "", "How strong the sharpening is."),
                 new PRow(S_ENH, "postfx.deband", "Deband", null, 0, "", "Smooths banding in gradients."),
@@ -5768,6 +5957,7 @@ namespace ClipGuard
                 new PRow(S_LUT, "!calrun", "Calibrate a projector...", null, 0, "", "Measures the projector with the meter and builds a 3D LUT around your white, with a check and a PDF report. Enter starts: the projector's name, then a .ccss correction from the Calibration folder, or none."),
                 new PRow(S_LUT, "!lut", "LUT", null, 0, "", "The calibration LUT the picture uses: None, or a projector you calibrated. F5 while watching turns it off and on for comparing."),
                 new PRow(S_LUT, "out.cubeLutMode", "LUT mode", new[] { "Off", "Gamma only", "Greyscale", "Full 3D" }, 0, "", "How the calibration LUT is applied (Full 3D for a calibration)."),
+                new PRow(S_LUT, "out.lutLevels", "Display levels", new[] { "From LUT", "Manual" }, 0, "", "From LUT: SDR display nits, Static nits and Display black are the white and black the calibration measured. Manual: your own values. Changing one of those rows switches to Manual."),
                 new PRow(S_LUT, "!caldir", "Calibration folder", null, 0, "", "Put .ccss corrections here (any name; the calibration lets you pick one). The LUTs and reports are saved here too."),
                 new PRow(S_OUT, "!gamma", "Output gamma", null, 0, "", "Set it to your projector's gamma. 2.2 is Unplugged's own; 2.4 and BT.1886 re-encode the picture at the very end. With a calibration LUT on, the LUT sets the gamma and this is not used."),
                 new PRow(S_OUT, "!frm", "Match frame rate", null, 0, "", "Switches the graphics card's refresh rate to the film's or the capture source's (23.976, 24, 50, 59.94, 60) and back in the library."),
@@ -5810,7 +6000,7 @@ namespace ClipGuard
                 if (r.Kind == 0) return r.On ? "On" : "Off";
                 if (r.Key == "out.upscaling" && GetFsr != null && GetFsr() > 0) return GetFsr() == 2 ? "ArtCNN C4F32" : "FSRCNNX";
                 if (r.Kind == 2) return p.Names != null && r.Opt >= 0 && r.Opt < p.Names.Length ? p.Names[r.Opt] : r.Opt.ToString(CultureInfo.InvariantCulture);
-                return r.Val.ToString(p.Step < 0.01 ? "0.000" : (p.Step < 0.1 ? "0.00" : (p.Step < 1 ? "0.0" : "0")), CultureInfo.InvariantCulture) + p.Unit;
+                return r.Val.ToString(p.Step < 0.01 ? "0.000" : (p.Step < 0.1 ? "0.00" : (p.Step < 1 ? "0.0" : "0")), CultureInfo.InvariantCulture) + p.Unit + (r.FromLut ? " (LUT)" : "");
             }
 
             // A row's value as shown ("" for the player's own rows).
@@ -5835,6 +6025,7 @@ namespace ClipGuard
                 try { rows = Load(); } catch (Exception) { return; }
                 R r = Find(rows, p.Key);
                 if (r == null || r.Kind == 4) return;
+                if (r.FromLut) SetValue("out.lutLevels", "1");   // 2.91.0: a hand change wins over the LUT's levels
                 if (r.Kind == 0) SetValue(r.Key, r.On ? "false" : "true");
                 else if (r.Kind == 1)
                 {
@@ -5924,7 +6115,60 @@ namespace ClipGuard
                     // are), through MPC-BE's MPC Audio Renderer in WASAPI exclusive mode.
                     if (r.Key == "audio.mode") r.Opt = 0;   // option 0 = Bitstream (value 1)
                 }
+                ApplyLutLevels(rows);
                 return rows;
+            }
+
+            // 2.91.0: a calibration LUT's .txt carries the white and black it measured
+            // (white_nits= / black_nits=). With Display levels on From LUT and a LUT in use,
+            // they replace SDR display nits, Static nits and Display black.
+            static readonly string[] LevelRows = { "hdr.sdrNits", "hdr.maxNits", "hdr.blackNits" };
+            public static bool LutLevels(string cube, out double white, out double black)
+            {
+                white = 0; black = -1;
+                try
+                {
+                    if (string.IsNullOrEmpty(cube)) return false;
+                    string t = Path.ChangeExtension(cube, ".txt");
+                    if (!File.Exists(t)) return false;
+                    foreach (string raw in File.ReadAllLines(t))
+                    {
+                        string line = raw.Trim();
+                        int eq = line.IndexOf('=');
+                        if (eq <= 0) continue;
+                        string k = line.Substring(0, eq).Trim().ToLowerInvariant(), v = line.Substring(eq + 1).Trim();
+                        if (k == "white_nits") white = Num(v, 0);
+                        else if (k == "black_nits") black = Num(v, -1);
+                    }
+                }
+                catch (Exception) { return false; }
+                return white >= 10 && black >= 0;
+            }
+            static void ApplyLutLevels(List<R> rows)
+            {
+                R lv = Find(rows, "out.lutLevels"), lp = Find(rows, "out.cubeLut"), lm = Find(rows, "out.cubeLutMode");
+                if (lv == null || lp == null || lm == null || lv.Opt != 0 || lm.Opt == 0) return;
+                double w, b;
+                if (!LutLevels(lp.File, out w, out b)) return;
+                foreach (R r in rows)
+                {
+                    if (Array.IndexOf(LevelRows, r.Key) < 0) continue;
+                    double v = r.Key == "hdr.blackNits" ? Math.Round(b, 3) : Math.Round(w);
+                    r.Val = Math.Max(r.Mn, Math.Min(r.Mx, v));
+                    r.FromLut = true;
+                }
+            }
+            static string LevelSets(List<R> rows)
+            {
+                StringBuilder sb = new StringBuilder();
+                foreach (string k in LevelRows)
+                {
+                    R r = Find(rows, k);
+                    if (r == null) continue;
+                    if (sb.Length > 0) sb.Append(';');
+                    sb.Append(EngineKey(k)).Append('=').Append(r.Val.ToString("G6", CultureInfo.InvariantCulture));
+                }
+                return sb.ToString();
             }
 
             // 2.66.0: the calibration LUT (the renderer's own 3D LUT, set by the player).
@@ -5952,6 +6196,18 @@ namespace ClipGuard
                 int m = lutMode.Opt;
                 string file = m > 0 ? lutPath.File : "";
                 Engine.Cmd("{\"a\":\"lut\",\"file\":\"" + Engine.Esc(file) + "\",\"mode\":" + m.ToString(CultureInfo.InvariantCulture) + "}");
+                string lv = LevelSets(rows);   // 2.91.0: the display levels follow the LUT
+                if (lv.Length > 0) Engine.Cmd("{\"a\":\"set\",\"sets\":\"" + lv + "\"}");
+            }
+
+            // 2.93.2: a paused frame is only redrawn when the engine is sent settings: the
+            // display levels are sent again as they are, which asks for that redraw.
+            public static void Redraw()
+            {
+                List<R> rows;
+                try { rows = Load(); } catch (Exception) { return; }
+                string lv = LevelSets(rows);
+                if (lv.Length > 0) Engine.Cmd("{\"a\":\"set\",\"sets\":\"" + lv + "\"}");
             }
 
             public static void Push()
@@ -6568,8 +6824,30 @@ namespace ClipGuard
         // Whether a Dolby Vision enhancement layer is full or minimal is not in Plex: the
         // renderer reads it from the RPU while the film plays, and it is remembered here.
         volatile bool hdrFilling;
+        // 2.92.0: the home rows keep their own copies of a film; each copy gets the HDR
+        // details another copy of it already has, so Continue Watching and Recently Added
+        // show the tags too.
+        void ShareMedia()
+        {
+            Dictionary<string, Movie> have = new Dictionary<string, Movie>();
+            List<Movie>[] lists = { movies, recent, cont };
+            foreach (List<Movie> l in lists)
+                if (l != null) foreach (Movie m in l)
+                    if (m != null && m.Srv != null && m.Hdr.Length > 0 && !have.ContainsKey(m.Srv.Id + ":" + m.Key)) have[m.Srv.Id + ":" + m.Key] = m;
+            foreach (List<Movie> l in lists)
+                if (l != null) foreach (Movie m in l)
+                {
+                    Movie h;
+                    if (m == null || m.Srv == null || m.Hdr.Length > 0 || !have.TryGetValue(m.Srv.Id + ":" + m.Key, out h)) continue;
+                    m.Hdr = h.Hdr; m.Dovi = h.Dovi;
+                    if (m.Res.Length == 0) m.Res = h.Res;
+                    if (m.Audio.Length == 0) m.Audio = h.Audio;
+                }
+        }
+
         void HdrFill()
         {
+            ShareMedia();
             if (hdrFilling) return;
             List<Movie> want = new List<Movie>();
             HashSet<string> seen = new HashSet<string>();
@@ -6632,7 +6910,7 @@ namespace ClipGuard
                         + ", one by one " + singleGot + " of " + singleTried + ", failed requests " + failed + "\r\n");
                 }
                 catch (Exception) { }
-            }, delegate { hdrFilling = false; SaveLibraryCache(); Invalidate(); }, delegate(Exception ex) { hdrFilling = false; });
+            }, delegate { hdrFilling = false; ShareMedia(); SaveLibraryCache(); Invalidate(); }, delegate(Exception ex) { hdrFilling = false; });
         }
 
         // Full / minimal enhancement layers seen while playing, by server and film.
