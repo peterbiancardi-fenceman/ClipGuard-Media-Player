@@ -27,6 +27,9 @@ through a capture card, with the same picture processing.
   ClipGuard and the picture settings applied. It needs an unencrypted HDMI signal (see
   below).
 - **Remote control.** It learns your remote's buttons (see [Remote control](#remote-control)).
+- **Made for a home theater PC.** A Power tab (close or restart the player, shut down
+  the HTPC), Start with Windows, five dark colour themes, soft menu sounds, and Sort /
+  Show (unwatched only) for Movies and TV Shows.
 
 ## Requirements
 
@@ -58,13 +61,18 @@ Settings and logs are kept in `%LOCALAPPDATA%\ClipGuard`.
 | Key | Action |
 | --- | --- |
 | Arrows, Enter | Move, select |
-| Backspace / Back | Back |
+| Esc, Backspace / Back | Back (it never closes the player) |
 | F4 | Video Processor (in the library); back to the library (while watching) |
+| Ctrl+V / Ctrl+M | Video Processor / back to the Media Player, from anywhere |
+| F6 | ClipGuard's banner at the top, on / off |
 | F7 | ClipGuard menu |
 | F5 | Calibration LUT off / on |
 | A | Sound and subtitles |
-| I | Info |
-| Esc | Close the player |
+| I | The film's bar (in a film); Info (in Video Processor) |
+| Alt+F4 | Close the player (or Power > Close ClipGuard Media Player) |
+
+On Movies and TV Shows, OK on the tab opens Sort by (title, date added, release year,
+running time) and Show (all, or unwatched only); each remembers its own choice.
 
 ## Remote control
 
@@ -74,13 +82,16 @@ or Fire TV remote, usually don't send their buttons to Windows.) To set it up:
 
 1. Go to **Settings > Learn remote** and press Enter.
 2. The player asks for each button in turn: Up, Down, Left, Right, OK, Back,
-   Play / Pause, Stop, Next chapter, Previous chapter, Skip forward, Skip back and
-   Menu. Press that button on your remote.
-3. If your remote doesn't have a button, wait 8 seconds and the player moves on.
+   Play / Pause, Stop, Next chapter, Previous chapter, Skip forward, Skip back, Menu,
+   Video Processor, Media Player and Banner. Press that button on your remote.
+3. If your remote doesn't have a button, wait 8 seconds and the player moves on (a
+   button you skip keeps what it had).
 
 The row shows how many buttons have been learned. Run it again at any time to change
 them. The keyboard keys keep working alongside the remote. While watching, Menu opens
-the sound and subtitle menu.
+the sound and subtitle menu (Up from its first line reaches the Sound / Subtitles tabs).
+A remote's Home button shows or hides ClipGuard's banner, like F6, while the player is
+in front.
 
 ## Video Processor and copy protection
 

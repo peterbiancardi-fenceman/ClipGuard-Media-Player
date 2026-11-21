@@ -24,10 +24,10 @@ namespace ClipGuard
     {
 #if STANDALONE && PUBLIC
         const string Title = "ClipGuard Media Player";
-        public const string MediaPlayerVersion = "0.9.0";   // the public beta's own numbering
+        public const string MediaPlayerVersion = "0.9.1";   // the public beta's own numbering
 #elif STANDALONE
         const string Title = "ClipGuard Media Player";
-        public const string MediaPlayerVersion = "2.72.0";
+        public const string MediaPlayerVersion = "2.87.1";
 #else
         const string Title = "ClipGuard+ Player (test)";
 #endif
@@ -164,7 +164,6 @@ namespace ClipGuard
         // The first start: the Test build's settings, ClipGuard's settings and the LUTs.
         static void Migrate(string seedIni, string liveIni)
         {
-#if PUBLIC
             // Public build: a fresh start, nothing brought over from the test builds.
             try
             {
@@ -174,7 +173,6 @@ namespace ClipGuard
             }
             catch (Exception) { }
             return;
-#endif
             string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             try
             {

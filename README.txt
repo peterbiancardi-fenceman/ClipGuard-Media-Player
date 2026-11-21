@@ -8,9 +8,10 @@ Processor), with ClipGuard and the picture settings.
 The full guide, updates and problem reports:
 https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player
 
-Keys: Arrows / Enter move and select, Backspace back, F4 Video Processor (in the
-library) or back to the library (while watching), F7 ClipGuard menu, F5 calibration
-LUT off / on, A sound and subtitles, I info, Esc close the player.
+Keys: Arrows / Enter move and select, Esc or Backspace back, F4 Video Processor (in
+the library) or back to the library (while watching), F6 ClipGuard's banner, F7
+ClipGuard menu, F5 calibration LUT off / on, A sound and subtitles, I the film's bar
+or info, Alt+F4 (or Power > Close) close the player.
 
 Video Processor needs an unencrypted HDMI signal. ClipGuard Media Player does not
 decrypt, remove or bypass HDCP or any other copy protection, and it cannot record or

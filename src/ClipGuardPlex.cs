@@ -26,6 +26,7 @@ using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -62,6 +63,9 @@ namespace ClipGuard
     {
         public string Res = "", Hdr = "", Audio = "", PartKey = "", File = "";
         public long Size, PartId;
+        // 2.86.0: for the banner's FILE column
+        public string Container = "", VCodec = "", VProfile = "", Dovi = "";
+        public long Bitrate, VBitrate, BitDepth;
         public bool Indexes;   // 2.57.0: Plex has preview thumbnails for it
         public List<PStream> Audios = new List<PStream>(), Subs = new List<PStream>();
         public string Label()
@@ -81,7 +85,7 @@ namespace ClipGuard
         public List<Ver> Versions = new List<Ver>();
         public int VerIdx;
         public string Key = "", Title = "", Thumb = "", Art = "", Summary = "", Rating = "", File = "", PartKey = "", Res = "";
-        public string Hdr = "", Audio = "";
+        public string Hdr = "", Audio = "", Edition = "";
         public int Year;
         public long Duration, Offset, AddedAt;
         public int ViewCount;
@@ -94,6 +98,125 @@ namespace ClipGuard
         public string Poster { get { return Type == "episode" && ShowThumb.Length > 0 ? ShowThumb : Thumb; } }
         public string Code { get { return "S" + SeasonNum.ToString(CultureInfo.InvariantCulture) + " E" + EpNum.ToString(CultureInfo.InvariantCulture); } }
     }
+
+#if PLAYER
+    // 2.86.1: menu sounds through waveOut: a stream of silence (44.1 kHz, 16-bit mono, four
+    // 30 ms buffers) with the tones mixed in, so the receiver's audio link stays awake.
+    sealed class MenuAudio
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct WaveFormat { public short tag, channels; public int rate, avgBytes; public short align, bits, extra; }
+        [StructLayout(LayoutKind.Sequential)]
+        struct WaveHdr { public IntPtr data; public uint length, recorded; public IntPtr user; public uint flags, loops; public IntPtr next, reserved; }
+        [DllImport("winmm.dll")] static extern int waveOutOpen(out IntPtr h, uint dev, ref WaveFormat f, IntPtr cb, IntPtr inst, uint flags);
+        [DllImport("winmm.dll")] static extern int waveOutPrepareHeader(IntPtr h, IntPtr hdr, uint size);
+        [DllImport("winmm.dll")] static extern int waveOutUnprepareHeader(IntPtr h, IntPtr hdr, uint size);
+        [DllImport("winmm.dll")] static extern int waveOutWrite(IntPtr h, IntPtr hdr, uint size);
+        [DllImport("winmm.dll")] static extern int waveOutReset(IntPtr h);
+        [DllImport("winmm.dll")] static extern int waveOutClose(IntPtr h);
+
+        const int Rate = 44100, BufSamples = 1323, NBuf = 4;
+        readonly object gate = new object();
+        Thread thread;
+        volatile bool run;
+        short[] pending;
+        int pendingPos;
+
+        public void Start()
+        {
+            lock (gate)
+            {
+                if (run) return;
+                run = true;
+                thread = new Thread(Loop);
+                thread.IsBackground = true;
+                thread.Start();
+            }
+        }
+
+        public void Stop()
+        {
+            Thread t;
+            lock (gate) { if (!run) return; run = false; t = thread; thread = null; }
+            if (t != null) t.Join(1000);
+        }
+
+        // A 16-bit mono WAV made by Tone(): its samples are mixed into the stream.
+        public void Play(byte[] wav)
+        {
+            int n = (wav.Length - 44) / 2;
+            if (n <= 0) return;
+            short[] smp = new short[n];
+            Buffer.BlockCopy(wav, 44, smp, 0, n * 2);
+            lock (gate) { pending = smp; pendingPos = 0; }
+        }
+
+        void Loop()
+        {
+            IntPtr h = IntPtr.Zero;
+            IntPtr[] hdrs = new IntPtr[NBuf], datas = new IntPtr[NBuf];
+            int hs = Marshal.SizeOf(typeof(WaveHdr));
+            int flagsOff = (int)Marshal.OffsetOf(typeof(WaveHdr), "flags");
+            try
+            {
+                WaveFormat f = new WaveFormat { tag = 1, channels = 1, rate = Rate, avgBytes = Rate * 2, align = 2, bits = 16, extra = 0 };
+                if (waveOutOpen(out h, 0xFFFFFFFF, ref f, IntPtr.Zero, IntPtr.Zero, 0) != 0) { h = IntPtr.Zero; return; }
+                short[] buf = new short[BufSamples];
+                for (int i = 0; i < NBuf; i++)
+                {
+                    datas[i] = Marshal.AllocHGlobal(BufSamples * 2);
+                    hdrs[i] = Marshal.AllocHGlobal(hs);
+                    WaveHdr wh = new WaveHdr { data = datas[i], length = (uint)(BufSamples * 2) };
+                    Marshal.StructureToPtr(wh, hdrs[i], false);
+                    waveOutPrepareHeader(h, hdrs[i], (uint)hs);
+                    Fill(buf, datas[i]);
+                    waveOutWrite(h, hdrs[i], (uint)hs);
+                }
+                while (run)
+                {
+                    for (int i = 0; i < NBuf; i++)
+                    {
+                        if ((Marshal.ReadInt32(hdrs[i], flagsOff) & 1) == 0) continue;   // WHDR_DONE
+                        Fill(buf, datas[i]);
+                        waveOutWrite(h, hdrs[i], (uint)hs);
+                    }
+                    Thread.Sleep(5);
+                }
+            }
+            catch (Exception) { }
+            finally
+            {
+                if (h != IntPtr.Zero)
+                {
+                    try { waveOutReset(h); } catch (Exception) { }
+                    for (int i = 0; i < NBuf; i++) if (hdrs[i] != IntPtr.Zero) try { waveOutUnprepareHeader(h, hdrs[i], (uint)hs); } catch (Exception) { }
+                    try { waveOutClose(h); } catch (Exception) { }
+                }
+                for (int i = 0; i < NBuf; i++)
+                {
+                    if (hdrs[i] != IntPtr.Zero) Marshal.FreeHGlobal(hdrs[i]);
+                    if (datas[i] != IntPtr.Zero) Marshal.FreeHGlobal(datas[i]);
+                }
+            }
+        }
+
+        void Fill(short[] buf, IntPtr dst)
+        {
+            Array.Clear(buf, 0, buf.Length);
+            lock (gate)
+            {
+                if (pending != null)
+                {
+                    int n = Math.Min(buf.Length, pending.Length - pendingPos);
+                    Array.Copy(pending, pendingPos, buf, 0, n);
+                    pendingPos += n;
+                    if (pendingPos >= pending.Length) pending = null;
+                }
+            }
+            Marshal.Copy(buf, 0, dst, buf.Length);
+        }
+    }
+#endif
 
     static class Plex
     {
@@ -189,6 +312,7 @@ namespace ClipGuard
             Movie mv = new Movie();
             mv.Key = Str(m, "ratingKey");
             mv.Title = Str(m, "title");
+            mv.Edition = Str(m, "editionTitle");   // 2.86.0
             mv.Year = (int)Num(m, "year");
             mv.Thumb = Str(m, "thumb");
             mv.Art = Str(m, "art");
@@ -224,6 +348,10 @@ namespace ClipGuard
                 Ver v = new Ver();
                 string res = Str(md, "videoResolution");
                 v.Res = res == "4k" ? "4K" : (res.Length > 0 && char.IsDigit(res[0]) ? res + "p" : res.ToUpperInvariant());
+                v.Container = Str(md, "container");
+                v.Bitrate = Num(md, "bitrate");
+                v.VCodec = Str(md, "videoCodec");
+                v.VProfile = Str(md, "videoProfile");
                 object[] parts = Arr(md, "Part");
                 if (parts.Length > 0)
                 {
@@ -237,6 +365,13 @@ namespace ClipGuard
                     {
                         streams = true;
                         long type = Num(st, "streamType");
+                        if (type == 1 && v.VBitrate == 0)
+                        {
+                            v.VBitrate = Num(st, "bitrate");
+                            v.BitDepth = Num(st, "bitDepth");
+                            if (Get(st, "DOVIProfile") != null)
+                                v.Dovi = Num(st, "DOVIProfile").ToString(CultureInfo.InvariantCulture) + (Get(st, "DOVIBLCompatID") != null ? "." + Num(st, "DOVIBLCompatID").ToString(CultureInfo.InvariantCulture) : "");
+                        }
                         if (type == 1 && v.Hdr.Length == 0)
                         {
                             if (Bool(st, "DOVIPresent")) v.Hdr = "Dolby Vision";
@@ -339,8 +474,14 @@ namespace ClipGuard
             string TabRowName(int i);
             string TabRowValue(int i);
             void TabRowStep(int i, int dir);
-            bool Fsrcnnx();
-            void SetFsrcnnx(bool on);
+            int NeuralUpscaler();             // 2.85.0: 0 none, 1 FSRCNNX, 2 ArtCNN C4F32
+            void SetNeuralUpscaler(int v);
+            bool Ssr();                       // 2.85.0: SSimSuperRes
+            void SetSsr(bool on);
+            bool KscapeReady();               // 2.74.0: a Kaleidescape answers on the network
+            int KscapeMode();                 // its play mode (2 = playing)
+            void KscapeSend(string command);  // a control-protocol command (UP, SELECT, PLAY ...)
+            void ToggleClipGuardBanner();     // 2.83.0: F6, from the Home button
         }
         IPlayerHost PHost { get { return host as IPlayerHost; } }
 #endif
@@ -359,8 +500,25 @@ namespace ClipGuard
         const uint MOD_NOREPEAT = 0x4000;
         const int HK_F4 = 101, HK_L = 102, HK_R = 103, HK_ENTER = 104, HK_ESC = 105;
 
-        static readonly Color Bg = Color.FromArgb(14, 15, 18), Grey = Color.FromArgb(167, 171, 179), Card = Color.FromArgb(34, 37, 43),
+        // 2.75.0: the colours come from the theme (Settings > Theme). "Yellow" is the theme's
+        // highlight; focus always has a white outline as well.
+        static Color Bg = Color.FromArgb(14, 15, 18), Grey = Color.FromArgb(167, 171, 179), Card = Color.FromArgb(34, 37, 43),
             Yellow = Color.FromArgb(255, 212, 0), Dim = Color.FromArgb(42, 45, 51);
+        static readonly string[] ThemeNames = { "Midnight", "Cinema", "Ocean", "Graphite", "High Contrast" };
+        static readonly Color[][] Themes = {
+            // background, card, dim, grey text, highlight
+            new[] { Color.FromArgb(14, 15, 18), Color.FromArgb(34, 37, 43), Color.FromArgb(42, 45, 51), Color.FromArgb(167, 171, 179), Color.FromArgb(255, 212, 0) },
+            new[] { Color.FromArgb(10, 6, 6), Color.FromArgb(72, 18, 22), Color.FromArgb(52, 22, 24), Color.FromArgb(196, 172, 172), Color.FromArgb(255, 212, 0) },
+            new[] { Color.FromArgb(6, 12, 24), Color.FromArgb(22, 44, 82), Color.FromArgb(28, 40, 64), Color.FromArgb(168, 184, 208), Color.FromArgb(240, 244, 255) },
+            new[] { Color.FromArgb(12, 12, 12), Color.FromArgb(40, 40, 40), Color.FromArgb(50, 50, 50), Color.FromArgb(160, 160, 160), Color.FromArgb(236, 236, 236) },
+            new[] { Color.FromArgb(0, 0, 0), Color.FromArgb(22, 22, 22), Color.FromArgb(70, 70, 70), Color.FromArgb(220, 220, 220), Color.FromArgb(255, 220, 0) } };
+        static int themeIdx;
+        static void ApplyTheme(int i)
+        {
+            themeIdx = Math.Max(0, Math.Min(Themes.Length - 1, i));
+            Color[] t = Themes[themeIdx];
+            Bg = t[0]; Card = t[1]; Dim = t[2]; Grey = t[3]; Yellow = t[4];
+        }
         static readonly Color[] Tones = { Color.FromArgb(43, 58, 85), Color.FromArgb(74, 46, 46), Color.FromArgb(46, 74, 58), Color.FromArgb(74, 65, 48), Color.FromArgb(58, 46, 74), Color.FromArgb(46, 63, 74) };
         const int WebPort = 13579;
 
@@ -379,7 +537,7 @@ namespace ClipGuard
 #endif
         static int ClampDelay(int d) { return Math.Max(DelayMin, Math.Min(1000, d)); }
 
-        enum Screen2 { Busy, SignIn, Home, Movies, Details, Settings, VP, Picture, ClipGuard, Shows, Show, Starting }
+        enum Screen2 { Busy, SignIn, Home, Movies, Details, Settings, VP, Picture, ClipGuard, Shows, Show, Starting, Power }
 #if STANDALONE
         const string AppName = "ClipGuard Media Player";
 #else
@@ -387,10 +545,11 @@ namespace ClipGuard
 #endif
         // 2.64.0: the Player has Video Processor (capture) and Picture (its own settings) tabs.
 #if PLAYER
-        const int TabTV = 2, TabVP = 3, TabPicture = 4, TabClipGuard = 5, TabSettings = 6, TabCount = 7;
-        static readonly string[] TabNames = { "Home", "Movies", "TV Shows", "Video Processor", "Picture", "ClipGuard", "Settings" };
+        // 2.73.0: Power, the only way to close the player (or shut the PC down).
+        const int TabTV = 2, TabVP = 3, TabPicture = 4, TabClipGuard = 5, TabSettings = 6, TabPower = 7, TabCount = 8;
+        static readonly string[] TabNames = { "Home", "Movies", "TV Shows", "Video Processor", "Picture", "ClipGuard", "Settings", "Power" };
 #else
-        const int TabTV = -1, TabVP = -1, TabPicture = -1, TabClipGuard = -1, TabSettings = 2, TabCount = 3;
+        const int TabTV = -1, TabVP = -1, TabPicture = -1, TabClipGuard = -1, TabSettings = 2, TabPower = -1, TabCount = 3;
         static readonly string[] TabNames = { "Home", "Movies", "Settings" };
 #endif
         Screen2 TabScreen(int t)
@@ -401,6 +560,7 @@ namespace ClipGuard
             if (t == TabVP) return Screen2.VP;
             if (t == TabPicture) return Screen2.Picture;
             if (t == TabClipGuard) return Screen2.ClipGuard;
+            if (t == TabPower) return Screen2.Power;
             return Screen2.Settings;
         }
         Screen2 scr = Screen2.Busy;
@@ -467,6 +627,9 @@ namespace ClipGuard
             cacheDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipGuard", "PlexCache");
             try { Directory.CreateDirectory(cacheDir); } catch (Exception) { }
 
+            int th;
+            ApplyTheme(int.TryParse(Ini("Theme", "0"), NumberStyles.Integer, CultureInfo.InvariantCulture, out th) ? th : 0);   // 2.75.0
+            BackColor = Bg;
             Plex.ClientId = Ini("PlexClientId", "");
             if (Plex.ClientId.Length < 8) { Plex.ClientId = Guid.NewGuid().ToString(); SetIni("PlexClientId", Plex.ClientId); }
             token = Ini("PlexToken", "");
@@ -489,9 +652,9 @@ namespace ClipGuard
 
             playTimer = new System.Windows.Forms.Timer();
             playTimer.Interval = 1000;
-            playTimer.Tick += delegate { PlayTick(); };
+            playTimer.Tick += delegate { PlayTick(); FileInfoTick(); };
 #if PLAYER
-            if (PHost != null) { IPlayerHost ph = PHost; UnpluggedSettings.GetFsr = ph.Fsrcnnx; UnpluggedSettings.SetFsr = ph.SetFsrcnnx; }
+            if (PHost != null) { IPlayerHost ph = PHost; UnpluggedSettings.GetFsr = ph.NeuralUpscaler; UnpluggedSettings.SetFsr = ph.SetNeuralUpscaler; }
             // 2.66.0: the LUT moved from ClipGuard's LUT row to Picture > Calibration LUT; the
             // Titan / Valerion LUT that was chosen there is chosen here, once.
             try
@@ -528,7 +691,7 @@ namespace ClipGuard
             // while the player covers the screen, it comes back (not while a panel is open).
             focusTimer = new System.Windows.Forms.Timer();
             focusTimer.Interval = 300;
-            focusTimer.Tick += delegate { KeepFocus(); };
+            focusTimer.Tick += delegate { KeepFocus(); MenuAudioTick(); };   // 2.86.1: menu sound stream
             focusTimer.Start();
 #endif
 
@@ -996,8 +1159,8 @@ namespace ClipGuard
                 if (rtv.Count > 30) rtv.RemoveRange(30, rtv.Count - 30);
             }, delegate
             {
-                all.Sort(delegate(Movie a, Movie b) { return string.Compare(SortTitle(a.Title), SortTitle(b.Title), StringComparison.OrdinalIgnoreCase); });
-                tv.Sort(delegate(Movie a, Movie b) { return string.Compare(SortTitle(a.Title), SortTitle(b.Title), StringComparison.OrdinalIgnoreCase); });
+                all.Sort(delegate(Movie a, Movie b) { return string.Compare(SortTitle(a.Title ?? ""), SortTitle(b.Title ?? ""), StringComparison.OrdinalIgnoreCase); });
+                tv.Sort(delegate(Movie a, Movie b) { return string.Compare(SortTitle(a.Title ?? ""), SortTitle(b.Title ?? ""), StringComparison.OrdinalIgnoreCase); });
                 movies = all; recent = rec; shows = tv; recentTv = rtv;
                 SplitContinue(c);
                 showIdx = Math.Min(showIdx, Math.Max(0, shows.Count - 1));
@@ -1174,7 +1337,8 @@ namespace ClipGuard
 #if PLAYER
             if (calState != 0) { CalDlgKey(keyData); Invalidate(); return true; }   // typing: no remote mapping
 #endif
-            if (OnKey(Remote.Translate(remote, keyData))) { Invalidate(); return true; }
+            Keys tk = Remote.Translate(remote, keyData);
+            if (OnKey(tk)) { MenuSound(tk & Keys.KeyCode); Invalidate(); return true; }   // 2.86.0: menu sounds
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
@@ -1197,7 +1361,7 @@ namespace ClipGuard
                 learnTimer.Tick += delegate
                 {
                     if (!learning) { learnTimer.Stop(); return; }
-                    if (DateTime.Now >= learnDeadline) { learnMap[learnIdx] = ""; LearnNext(); }
+                    if (DateTime.Now >= learnDeadline) { learnMap[learnIdx] = KeptButton(learnIdx); LearnNext(); }   // 2.80.0: a skipped button keeps what it had
                     Invalidate();
                 };
             }
@@ -1218,6 +1382,12 @@ namespace ClipGuard
             }
             learnMap[learnIdx] = code;
             LearnNext();
+        }
+
+        string KeptButton(int i)
+        {
+            string v = remote != null && i < remote.Length ? (remote[i] ?? "") : "";
+            return v.Length > 0 && Remote.Find(learnMap, v) < 0 ? v : "";
         }
 
         void LearnNext()
@@ -1256,8 +1426,20 @@ namespace ClipGuard
         {
 #if PLAYER
             if (calState != 0) return CalDlgKey(k);   // 2.66.0: the calibration dialog has the keyboard
-            // 2.53.1: Esc (or Alt+F4) shuts the player down from anywhere; Backspace is "back".
-            if (k == Keys.Escape || k == (Keys.Alt | Keys.F4)) { Quit(); return true; }
+            // 2.73.0: Esc is Back; the player closes only from the Power tab (Alt+F4 stays as a
+            // keyboard-only way out).
+            if (k == (Keys.Alt | Keys.F4)) { Quit(); return true; }
+            if (k == Keys.Escape) k = Keys.Back;
+            if (XmcVolumeKey(k)) return true;   // 2.75.0
+            // 2.74.0: the remote's two shortcut buttons (Ctrl+V, Ctrl+M on a keyboard).
+            if (k == (Keys.Control | Keys.V)) { if (scr != Screen2.Busy && scr != Screen2.SignIn) StartCapture(); return true; }
+            if (k == (Keys.Control | Keys.M))
+            {
+                if (scr == Screen2.Starting) CancelStarting();
+                if (scr != Screen2.Busy && scr != Screen2.SignIn) { scr = Screen2.Home; tab = 0; navFocus = false; }
+                XmcSwitch(false);   // 2.75.0
+                return true;
+            }
 #endif
 #if PLAYER
             // 2.64.0: F4 in the library is Video Processor (capture), as its help line says.
@@ -1280,15 +1462,20 @@ namespace ClipGuard
             if (message.Length > 0 && (k == Keys.Enter || back)) { message = ""; return true; }
             if (scr == Screen2.SignIn)
             {
+#if !PLAYER
                 if (back) { ExitToProcessor(); return true; }
+#endif
                 return true;
             }
             if (scr == Screen2.Details) return DetailsKey(k, back);
 #if PLAYER
             if (scr == Screen2.Show) return ShowKey(k, back);
 #endif
+            if (sortOpen) return SortKey(k, back);   // 2.86.1
             if (navFocus)
             {
+                // 2.86.1: OK on Movies or TV Shows opens the sort menu (Down goes into the grid).
+                if (k == Keys.Enter && (scr == Screen2.Movies || scr == Screen2.Shows)) { sortOpen = true; sortIdx = SortMode(); return true; }
                 if (k == Keys.Left) tab = (tab + TabCount - 1) % TabCount;
                 else if (k == Keys.Right) tab = (tab + 1) % TabCount;
                 else if (k == Keys.Down || k == Keys.Enter)
@@ -1298,7 +1485,11 @@ namespace ClipGuard
 #endif
                     navFocus = false;
                 }
+#if PLAYER
+                else if (back) { tab = 0; }   // 2.73.0: Back on the menu goes Home, never closes
+#else
                 else if (back) { ExitToProcessor(); return true; }
+#endif
                 scr = TabScreen(tab);
                 return true;
             }
@@ -1316,10 +1507,109 @@ namespace ClipGuard
                 case Screen2.VP: if (k == Keys.Enter) StartCapture(); else if (k == Keys.Up) navFocus = true; return true;
                 case Screen2.Picture: return PictureKey(k);
                 case Screen2.ClipGuard: return CgTabKey(k);
+                case Screen2.Power: return PowerKey(k);
 #endif
             }
             return false;
         }
+
+#if PLAYER
+        // ---- 2.73.0: Power: close the player, or shut the PC down ------------------------
+        int pwrIdx;
+        bool pwrConfirm;
+
+        bool PowerKey(Keys k)
+        {
+            if (pwrConfirm)
+            {
+                if (k == Keys.Enter) { pwrConfirm = false; ShutDownPc(); }
+                else if (k == Keys.Back || k == Keys.BrowserBack) pwrConfirm = false;
+                return true;
+            }
+            if (k == Keys.Up) { if (pwrIdx == 0) navFocus = true; else pwrIdx--; }
+            else if (k == Keys.Down) pwrIdx = Math.Min(2, pwrIdx + 1);
+            else if (k == Keys.Enter) { if (pwrIdx == 0) RestartPlayer(); else if (pwrIdx == 1) Quit(); else pwrConfirm = true; }
+            else return false;
+            return true;
+        }
+
+        // 2.78.0: Restart: a small hidden PowerShell waits for this process to end, then starts
+        // the player again (which also picks up an update). The XMC-2 is left on.
+        bool restarting;
+
+        // 2.81.0: XMC-2 to standby, only when the HTPC shuts down (ours, or Windows shutting
+        // down while the player is open). Closing or restarting the player leaves it on.
+        bool xmcStandbySent;
+        void XmcStandby()
+        {
+            if (xmcStandbySent) return;
+            try
+            {
+                if (xmc != null && xmc.Ready && (XmcInput(false) > 0 || XmcInput(true) > 0)) { xmc.PowerOff(); xmcStandbySent = true; }
+            }
+            catch (Exception) { }
+        }
+        void RestartPlayer()
+        {
+            try
+            {
+                string exe = Application.ExecutablePath.Replace("'", "''");
+                int pid = Process.GetCurrentProcess().Id;
+                ProcessStartInfo si = new ProcessStartInfo("powershell.exe",
+                    "-NoProfile -WindowStyle Hidden -Command \"Wait-Process -Id " + pid.ToString(CultureInfo.InvariantCulture)
+                    + " -Timeout 20 -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500; Start-Process -FilePath '" + exe + "'\"");
+                si.CreateNoWindow = true;
+                si.UseShellExecute = false;
+                si.WindowStyle = ProcessWindowStyle.Hidden;
+                Process.Start(si);
+            }
+            catch (Exception ex) { message = "The player could not be restarted: " + ex.Message; Invalidate(); return; }
+            restarting = true;
+            Quit();
+        }
+
+        void ShutDownPc()
+        {
+            // Windows waits 5 s, so the player closes cleanly first (Plex told where you
+            // stopped, the projector's refresh rate restored).
+            try
+            {
+                ProcessStartInfo si = new ProcessStartInfo("shutdown.exe", "/s /t 5");
+                si.CreateNoWindow = true;
+                si.UseShellExecute = false;
+                Process.Start(si);
+            }
+            catch (Exception ex) { message = "Windows did not start the shutdown: " + ex.Message; Invalidate(); return; }
+            XmcStandby();   // 2.81.0: the XMC-2 goes to standby only when the HTPC shuts down
+            Quit();
+        }
+
+        void DrawPower(Graphics g)
+        {
+            string[][] rows = {
+                new[] { "Restart ClipGuard Media Player", "Press Enter   (opens again straight away)" },
+                new[] { "Close ClipGuard Media Player", "Press Enter" },
+                new[] { "Shut down the HTPC", "Press Enter   (asks first)" } };
+            for (int i = 0; i < rows.Length; i++)
+            {
+                float y = 150 + i * 88;
+                RectangleF r = new RectangleF(96, y, 1728, 70);
+                using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, r);
+                Txt(g, rows[i][0], 26, true, Color.White, 126, y + 18);
+                Txt(g, rows[i][1], 24, false, Grey, 720, y + 20);
+                if (!navFocus && i == pwrIdx) Focus(g, r);
+            }
+            if (pwrConfirm)
+            {
+                RectangleF c = new RectangleF(560, 400, 800, 230);
+                using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, c);
+                using (SolidBrush yb = new SolidBrush(Yellow)) g.FillRectangle(yb, c.X, c.Y, c.Width, 5);
+                using (Pen w = new Pen(Color.White, 3)) g.DrawRectangle(w, c.X, c.Y, c.Width, c.Height);
+                Txt(g, "Shut down the HTPC?", 34, true, Color.White, c.X + 40, c.Y + 40);
+                Txt(g, "Enter: yes        Back: no", 26, false, Grey, c.X + 40, c.Y + 130);
+            }
+        }
+#endif
 
         // 0 Continue Watching, 1 Recently Added Movies, 2 Next Up, 3 Recently Added TV (2.71.0)
         List<Movie> HomeList(int r) { return r == 0 ? cont : (r == 1 ? recent : (r == 2 ? nextUp : recentTv)); }
@@ -1363,7 +1653,93 @@ namespace ClipGuard
         const int Cols = 7;
 
         // 2.68.0: the grid shows the films or the TV shows.
-        List<Movie> GL() { return scr == Screen2.Shows ? shows : movies; }
+        List<Movie> GL() { return SortedView(scr == Screen2.Shows); }
+
+        // ---- 2.86.1: sorting and filtering Movies and TV Shows ----------------------------
+        static readonly string[] SortNames = { "Title (A-Z)", "Date added (newest first)", "Release year (newest first)", "Release year (oldest first)", "Running time (shortest first)" };
+        static readonly string[] SortShort = { "Title", "Date added", "Newest", "Oldest", "Running time" };
+        bool sortOpen;
+        int sortIdx;
+        string SortKeyName(bool tv) { return tv ? "SortShows" : "SortMovies"; }
+        int SortMode() { return SortModeOf(scr == Screen2.Shows); }
+        int SortModeOf(bool tv) { int v; return int.TryParse(Ini(SortKeyName(tv), "0"), out v) ? Math.Max(0, Math.Min(SortNames.Length - 1, v)) : 0; }
+        bool UnwatchedOf(bool tv) { return Ini(tv ? "UnwatchedShows" : "UnwatchedMovies", "0") == "1"; }
+
+        List<Movie> svSrcM, svSrcS, svViewM, svViewS;
+        int svCountM = -1, svCountS = -1;
+        string svKeyM = "", svKeyS = "";
+
+        List<Movie> SortedView(bool tv)
+        {
+            List<Movie> src = tv ? shows : movies;
+            int mode = SortModeOf(tv);
+            bool uw = UnwatchedOf(tv);
+            string key = mode.ToString(CultureInfo.InvariantCulture) + (uw ? "u" : "a");
+            if (tv && src == svSrcS && src.Count == svCountS && key == svKeyS && svViewS != null) return svViewS;
+            if (!tv && src == svSrcM && src.Count == svCountM && key == svKeyM && svViewM != null) return svViewM;
+            List<Movie> v = uw ? src.FindAll(delegate(Movie m) { return tv ? (m.LeafCount <= 0 || m.ViewedLeafCount < m.LeafCount) : m.ViewCount == 0; }) : new List<Movie>(src);
+            Comparison<Movie> byTitle = delegate(Movie a, Movie b) { return string.Compare(SortTitle(a.Title ?? ""), SortTitle(b.Title ?? ""), StringComparison.OrdinalIgnoreCase); };
+            Comparison<Movie> cmp = mode == 1 ? delegate(Movie a, Movie b) { int c = b.AddedAt.CompareTo(a.AddedAt); return c != 0 ? c : byTitle(a, b); }
+                : mode == 2 ? delegate(Movie a, Movie b) { int c = b.Year.CompareTo(a.Year); return c != 0 ? c : byTitle(a, b); }
+                : mode == 3 ? delegate(Movie a, Movie b) { int c = (a.Year > 0 ? a.Year : 9999).CompareTo(b.Year > 0 ? b.Year : 9999); return c != 0 ? c : byTitle(a, b); }
+                : mode == 4 ? delegate(Movie a, Movie b) { int c = (a.Duration > 0 ? a.Duration : long.MaxValue).CompareTo(b.Duration > 0 ? b.Duration : long.MaxValue); return c != 0 ? c : byTitle(a, b); }
+                : byTitle;
+            v.Sort(cmp);
+            if (tv) { svSrcS = src; svCountS = src.Count; svKeyS = key; svViewS = v; }
+            else { svSrcM = src; svCountM = src.Count; svKeyM = key; svViewM = v; }
+            return v;
+        }
+
+        string SortLabel()
+        {
+            bool tv = scr == Screen2.Shows;
+            return SortShort[SortModeOf(tv)] + (UnwatchedOf(tv) ? " \u00b7 Unwatched" : "");
+        }
+
+        // Rows: the sorts, then All, then Unwatched only.
+        bool SortKey(Keys k, bool back)
+        {
+            int n = SortNames.Length + 2;
+            bool tv = scr == Screen2.Shows;
+            if (back) { sortOpen = false; return true; }
+            if (k == Keys.Up) sortIdx = Math.Max(0, sortIdx - 1);
+            else if (k == Keys.Down) sortIdx = Math.Min(n - 1, sortIdx + 1);
+            else if (k == Keys.Enter || k == Keys.Space)
+            {
+                if (sortIdx < SortNames.Length) SetIni(SortKeyName(tv), sortIdx.ToString(CultureInfo.InvariantCulture));
+                else SetIni(tv ? "UnwatchedShows" : "UnwatchedMovies", sortIdx == SortNames.Length + 1 ? "1" : "0");
+                GIdx = 0; GScroll = 0;
+                sortOpen = false;
+            }
+            return true;
+        }
+
+        void DrawSortMenu(Graphics g)
+        {
+            bool tv = scr == Screen2.Shows;
+            int mode = SortModeOf(tv);
+            bool uw = UnwatchedOf(tv);
+            const float w = 640, rowH = 54;
+            float h = 70 + SortNames.Length * rowH + 50 + 2 * rowH + 30;
+            float x = 96, y = 120;
+            RectangleF card = new RectangleF(x, y, w, h);
+            using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, card);
+            using (SolidBrush yb = new SolidBrush(Yellow)) g.FillRectangle(yb, x, y, w, 5);
+            using (Pen p = new Pen(Color.White, 2)) g.DrawRectangle(p, x, y, w, h);
+            Txt(g, "Sort by", 24, true, Color.White, x + 32, y + 22);
+            float ry = y + 70;
+            for (int i = 0; i < SortNames.Length + 2; i++)
+            {
+                if (i == SortNames.Length) { Txt(g, "Show", 24, true, Color.White, x + 32, ry + 8); ry += 50; }
+                string name = i < SortNames.Length ? SortNames[i] : (i == SortNames.Length ? "All" : "Unwatched only");
+                bool cur = i < SortNames.Length ? i == mode : (i == SortNames.Length + 1) == uw;
+                RectangleF r = new RectangleF(x + 16, ry, w - 32, rowH - 6);
+                if (cur) Txt(g, "\u25CF", 18, false, Yellow, r.X + 14, ry + 12);
+                Txt(g, name, 22, i == sortIdx, i == sortIdx ? Color.White : Color.FromArgb(220, 222, 226), r.X + 44, ry + 10);
+                if (i == sortIdx) Focus(g, r);
+                ry += rowH;
+            }
+        }
         int GIdx { get { return scr == Screen2.Shows ? showIdx : gridIdx; } set { if (scr == Screen2.Shows) showIdx = value; else gridIdx = value; } }
         int GScroll { get { return scr == Screen2.Shows ? showScroll : gridScroll; } set { if (scr == Screen2.Shows) showScroll = value; else gridScroll = value; } }
 
@@ -1546,7 +1922,10 @@ namespace ClipGuard
                 "Game audio delay\t" + GameAudioDelay().ToString(CultureInfo.InvariantCulture) + " ms   (capture card sound, added to the look-ahead; Left / Right)",
 #endif
 #if PLAYER
-                "Close the player\tPress Enter" };
+                "Start with Windows\t" + (StartWithWindows() ? "On" : "Off") + "   (opens the player when you sign in to Windows; Left / Right)",
+                "Theme\t" + ThemeNames[themeIdx] + "   (Left / Right)",
+                "Menu sounds\t" + new[] { "Off", "Soft", "Normal" }[MenuSoundLevel()] + "   (Left / Right)"
+                };
 #else
                 "Back to Video Processor\tPress Enter   (F4)" };
 #endif
@@ -1555,9 +1934,130 @@ namespace ClipGuard
         // 2.71.0: the row's meaning: the player has no "Audio delay now" row (row 1), so the
         // rows after it are one place higher on screen than their number here.
 #if PLAYER
-        int SetRow() { return setIdx >= 1 ? setIdx + 1 : setIdx; }
+        // 0.9.1: no XMC-2 rows (10, 11): Menu sounds is the 11th row shown.
+        int SetRow() { int r = setIdx >= 1 ? setIdx + 1 : setIdx; return r >= 10 ? r + 2 : r; }
 #else
         int SetRow() { return setIdx; }
+#endif
+
+#if PLAYER
+
+        // ---- 2.86.0: the film's file details for the top banner (FILE column) -------------
+        static readonly InfoShared fileInfo = new InfoShared(@"Local\ClipGuard_FileInfo");
+
+        void FileInfoTick()
+        {
+            if (player != null) return;   // 0.9.1: no FILE column in the public build
+            try
+            {
+                if (player == null || capturing || playing == null) return;
+                fileInfo.Write(string.Join("\n", FileInfoLines().ToArray()));
+            }
+            catch (Exception) { }
+        }
+
+        static string Mbps(long kbps) { return (kbps / 1000.0).ToString(kbps >= 100000 ? "0" : "0.0", CultureInfo.InvariantCulture) + " Mbps"; }
+
+        List<string> FileInfoLines()
+        {
+            Movie m = playing;
+            Ver v = curVer;
+            List<string> l = new List<string>();
+            string title = m.Type == "episode" && m.ShowTitle.Length > 0 ? m.ShowTitle + " " + m.Code : m.Title + (m.Year > 0 ? " (" + m.Year.ToString(CultureInfo.InvariantCulture) + ")" : "");
+            l.Add(InfoShared.Ascii(title));
+            if (v == null) return l;
+            string name = v.File.Length > 0 ? Path.GetFileName(v.File.Replace('/', '\\')) : "";
+            if (name.Length > 48) name = name.Substring(0, 45) + "...";
+            if (name.Length > 0) l.Add(InfoShared.Ascii(name));
+            List<string> cs = new List<string>();
+            if (v.Container.Length > 0) cs.Add(v.Container.ToUpperInvariant());
+            if (v.Size > 0) cs.Add((v.Size / 1073741824.0).ToString("0.0", CultureInfo.InvariantCulture) + " GB");
+            if (cs.Count > 0) l.Add(string.Join(" \u00B7 ", cs.ToArray()));
+            if (v.Bitrate > 0) l.Add(Mbps(v.Bitrate) + " overall" + (v.VBitrate > 0 ? ", " + Mbps(v.VBitrate) + " video" : ""));
+            List<string> vp = new List<string>();
+            string codec = v.VCodec.Equals("hevc", StringComparison.OrdinalIgnoreCase) ? "HEVC" : v.VCodec.Equals("h264", StringComparison.OrdinalIgnoreCase) ? "H.264" : v.VCodec.ToUpperInvariant();
+            if (codec.Length > 0) vp.Add((codec + " " + (v.VProfile.Length > 0 ? char.ToUpperInvariant(v.VProfile[0]) + v.VProfile.Substring(1) : "")).Trim());
+            if (v.Dovi.Length > 0) vp.Add("Dolby Vision profile " + v.Dovi);
+            else if (v.Hdr.Length > 0 && v.Hdr != "SDR") vp.Add(v.Hdr);
+            if (vp.Count > 0) l.Add(InfoShared.Ascii(string.Join(", ", vp.ToArray())));
+            int a = AudioNow();
+            string au = a >= 0 && a < audioNames.Count ? audioNames[a] : v.Audio;
+            if (au.Length > 0) l.Add("Audio: " + InfoShared.Ascii(au.Replace("  \u00b7  ", " \u00B7 ")));
+            int sb = SubNow();
+            string su = sb >= 0 && sb < subNames.Count ? subNames[sb] : "Off";
+            l.Add("Subtitles: " + InfoShared.Ascii(su.Replace("  \u00b7  ", " \u00B7 ")));
+            if (m.Edition.Length > 0) l.Add("Edition: " + InfoShared.Ascii(m.Edition));
+            return l;
+        }
+
+        // ---- 2.86.0: menu sounds (library and settings only, never in a film or capture) -------
+        // Short tones made here (no files): a tick to move, a rising click to select, a falling
+        // one to go back. Settings > Menu sounds: Off, Soft, Normal (ini MenuSounds 0 / 1 / 2).
+        int MenuSoundLevel() { int v; return int.TryParse(Ini("MenuSounds", "1"), out v) ? Math.Max(0, Math.Min(2, v)) : 1; }
+        readonly Dictionary<string, byte[]> soundCache = new Dictionary<string, byte[]>();
+
+        // 2.86.1: a silent stream runs while the menus are on screen, so the HDMI audio link
+        // to the receiver stays locked and the short tones are heard; it stops for a film or
+        // Video Processor, leaving the device to the video engine.
+        readonly MenuAudio menuAudio = new MenuAudio();
+
+        void MenuAudioTick()
+        {
+            bool want = player == null && !capturing && Visible && MenuSoundLevel() > 0 && scr != Screen2.Starting;
+            if (want) menuAudio.Start(); else menuAudio.Stop();
+        }
+
+        void MenuSound(Keys k)
+        {
+            try
+            {
+                if (player != null || capturing || learning) return;
+                int lvl = MenuSoundLevel();
+                if (lvl == 0) return;
+                string kind = (k == Keys.Up || k == Keys.Down || k == Keys.Left || k == Keys.Right) ? "move"
+                    : (k == Keys.Enter || k == Keys.Space) ? "select"
+                    : (k == Keys.Escape || k == Keys.Back || k == Keys.BrowserBack || k == Keys.F4) ? "back" : null;
+                if (kind == null) return;
+                string key = kind + lvl.ToString(CultureInfo.InvariantCulture);
+                byte[] wav;
+                if (!soundCache.TryGetValue(key, out wav))
+                {
+                    double amp = lvl == 1 ? 0.10 : 0.25;
+                    wav = kind == "move" ? Tone(1700, 1700, 0.018, amp) : kind == "select" ? Tone(900, 1350, 0.045, amp) : Tone(1100, 700, 0.045, amp);
+                    soundCache[key] = wav;
+                }
+                menuAudio.Start();
+                menuAudio.Play(wav);
+            }
+            catch (Exception) { }
+        }
+
+        // A sine sweep from f0 to f1 Hz, with a 2 ms fade in and an exponential fade out (16-bit mono WAV).
+        static byte[] Tone(double f0, double f1, double seconds, double amp)
+        {
+            const int rate = 44100;
+            int n = (int)(rate * seconds);
+            MemoryStream ms = new MemoryStream();
+            BinaryWriter w = new BinaryWriter(ms);
+            w.Write(Encoding.ASCII.GetBytes("RIFF")); w.Write(36 + n * 2); w.Write(Encoding.ASCII.GetBytes("WAVEfmt "));
+            w.Write(16); w.Write((short)1); w.Write((short)1); w.Write(rate); w.Write(rate * 2); w.Write((short)2); w.Write((short)16);
+            w.Write(Encoding.ASCII.GetBytes("data")); w.Write(n * 2);
+            double ph = 0;
+            for (int i = 0; i < n; i++)
+            {
+                double t = (double)i / n;
+                double f = f0 + (f1 - f0) * t;
+                ph += 2 * Math.PI * f / rate;
+                double env = Math.Min(1.0, i / (rate * 0.002)) * Math.Exp(-4.0 * t);
+                w.Write((short)(Math.Sin(ph) * env * amp * 32767));
+            }
+            w.Flush();
+            return ms.ToArray();
+        }
+
+#else
+        void FileInfoTick() { }
+        void MenuSound(Keys k) { }
 #endif
 
         int LearnedCount()
@@ -1579,6 +2079,22 @@ namespace ClipGuard
             }
 #if PLAYER
             else if ((k == Keys.Left || k == Keys.Right) && SetRow() == 6) SetIni("NextEpisode", Ini("NextEpisode", "1") != "0" ? "0" : "1");
+            else if ((k == Keys.Left || k == Keys.Right) && SetRow() == 8) SetStartWithWindows(!StartWithWindows());   // 2.73.0
+            else if ((k == Keys.Left || k == Keys.Right) && SetRow() == 9)
+            {
+                ApplyTheme((themeIdx + (k == Keys.Right ? 1 : Themes.Length - 1)) % Themes.Length);   // 2.75.0: live
+                SetIni("Theme", themeIdx.ToString(CultureInfo.InvariantCulture));
+                BackColor = Bg;
+                if (video != null) video.BackColor = Color.Black;
+            }
+            else if ((k == Keys.Left || k == Keys.Right) && (SetRow() == 10 || SetRow() == 11))
+            {
+                bool vp = SetRow() == 10;
+                int v = (XmcInput(vp) + (k == Keys.Right ? 1 : 8)) % 9;   // Off, HDMI 1..8
+                SetIni(vp ? "XmcVideoProcessorInput" : "XmcMediaPlayerInput", v.ToString(CultureInfo.InvariantCulture));
+            }
+            else if ((k == Keys.Left || k == Keys.Right) && SetRow() == 12)
+                SetIni("MenuSounds", ((MenuSoundLevel() + (k == Keys.Right ? 1 : 2)) % 3).ToString(CultureInfo.InvariantCulture));   // 2.86.0
             else if ((k == Keys.Left || k == Keys.Right) && SetRow() == 7)
             {
                 SetIni("GameAudioDelay", Math.Max(-500, Math.Min(500, GameAudioDelay() + (k == Keys.Right ? 10 : -10))).ToString(CultureInfo.InvariantCulture));
@@ -1609,7 +2125,7 @@ namespace ClipGuard
                 else if (SetRow() == 5) StartLearn();
 #if PLAYER
                 else if (SetRow() == 6) SetIni("NextEpisode", Ini("NextEpisode", "1") != "0" ? "0" : "1");
-                else if (SetRow() == 8) ExitToProcessor();
+                else if (SetRow() == 8) SetStartWithWindows(!StartWithWindows());
 #else
                 else if (SetRow() == 6) ExitToProcessor();
 #endif
@@ -1914,6 +2430,9 @@ namespace ClipGuard
 
         protected override void WndProc(ref Message msg)
         {
+#if PLAYER
+            if (msg.Msg == 0x0011 /* WM_QUERYENDSESSION */) XmcStandby();   // 2.81.0: Windows is shutting down
+#endif
             if (msg.Msg == WM_HOTKEY && player != null)
             {
                 int id = msg.WParam.ToInt32();
@@ -1931,6 +2450,9 @@ namespace ClipGuard
             {
                 int cmd = (int)(((long)msg.LParam >> 16) & 0x0FFF);
                 if (learning) { LearnCode(Keys.Attn, Remote.OfApp(cmd)); Invalidate(); msg.Result = (IntPtr)1; return; }
+#if PLAYER
+                if (XmcAppCommand(cmd)) { msg.Result = (IntPtr)1; return; }   // 2.75.0: volume to the XMC-2
+#endif
                 Keys t = Remote.TranslateApp(remote, cmd);
                 if (t != Keys.None && OnKey(t)) { Invalidate(); msg.Result = (IntPtr)1; return; }
             }
@@ -2029,6 +2551,8 @@ namespace ClipGuard
             capFpsLast = 0; lutCompareOff = false;
             if (PHost != null) PHost.SetPlayerSource(2);   // 2.64.1: Video Processor's look-ahead
             PublishCaptureAudio();                          // 2.69.0: before the card starts (the filter reads it then)
+            if (PHost != null && PHost.KscapeReady()) PHost.KscapeSend("LEAVE_STANDBY");   // 2.74.0: wake the Kaleidescape
+            XmcSwitch(true);   // 2.75.0: the XMC-2 to the Video Processor input
             EnsureVideo();
             Hide();
             string dev = capDevice;
@@ -2064,6 +2588,7 @@ namespace ClipGuard
         }
 
         // ---- 2.70.0: Waiting for signal, and the Info card ----------------------------------
+        DateTime capNoSigSince = DateTime.MinValue;   // 2.82.0
         bool capWaiting;          // no signal: the waiting card stays up until the picture comes
         bool capInfo;             // the card on screen is Info
         int capWaitTick;
@@ -2121,6 +2646,8 @@ namespace ClipGuard
             string cs = sCs == 2 ? "BT.2020" : (sCs == 1 ? "BT.709" : (sCs == 0 && sDr == 0 ? "BT.601" : ""));
             r.Add(new[] { "HDR", dr + (cs.Length > 0 ? ", " + cs : "") + (sDr == 1 || sDr == 2 ? "   (measured every frame)" : "") });
             r.Add(new[] { "Sound", SoundText() });
+            string rf = XmcFormat();
+            if (rf.Length > 0) r.Add(new[] { "Receiver", "XMC-2: " + rf });   // 2.75.0
             r.Add(new[] { "Projector", ProjectorText() });
             int la = host.LookAheadFrames();
             int ms = sNum > 0 && sDen > 0 ? (int)Math.Round(la * 1000.0 * sDen / sNum) : 0;
@@ -2160,36 +2687,111 @@ namespace ClipGuard
 
         void DrawInfoCard(Graphics g, float W)
         {
+            // 2.79.0: about half the size, in the bottom-right corner
             string[][] rows = InfoRows();
-            const float w = 1240;
-            float h = 150 + rows.Length * 46 + 50;
-            float x = (W - w) / 2, y = 1080 - h - 60;
+            const float w = 660;
+            float h = 64 + rows.Length * 28 + 40;
+            float x = W - w - 50, y = 1080 - h - 50;
             using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, x, y, w, h);
-            using (SolidBrush yb = new SolidBrush(Yellow)) g.FillRectangle(yb, x, y, w, 5);
-            Txt(g, "Info", 34, true, Color.White, x + 40, y + 26);
-            Txt(g, capDevice, 24, false, Grey, x + 40, y + 80);
-            float ry = y + 130;
+            using (SolidBrush yb = new SolidBrush(Yellow)) g.FillRectangle(yb, x, y, w, 4);
+            Txt(g, "Info", 22, true, Color.White, x + 24, y + 16);
+            Txt(g, capDevice, 15, false, Grey, x + 100, y + 22);
+            float ry = y + 62;
             foreach (string[] r in rows)
             {
-                Txt(g, r[0], 24, true, Grey, x + 40, ry);
-                Txt(g, r[1], 24, false, Color.White, x + 230, ry);
-                ry += 46;
+                Txt(g, r[0], 15, true, Grey, x + 24, ry);
+                Txt(g, r[1], 15, false, Color.White, x + 150, ry);
+                ry += 28;
             }
-            Txt(g, "F7  ClipGuard      I  info      Back  library", 20, false, Grey, x + 40, y + h - 44);
+            Txt(g, CapHelp(), 13, false, Grey, x + 24, y + h - 30);
         }
 
         void DrawWaitCard(Graphics g, float W)
         {
-            const float w = 900, h = 200;
-            float x = (W - w) / 2, y = 1080 - h - 70;
+            // 2.82.0: small, bottom-right, like Info
+            const float w = 420, h = 64;
+            float x = W - w - 50, y = 1080 - h - 50;
             using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, x, y, w, h);
-            using (SolidBrush yb = new SolidBrush(Yellow)) g.FillRectangle(yb, x, y, w, 5);
-            Txt(g, "Waiting for signal", 34, true, Color.White, x + 40, y + 28);
-            // three dots, one lit in turn (moves each second)
+            using (SolidBrush yb = new SolidBrush(Yellow)) g.FillRectangle(yb, x, y, w, 4);
+            Txt(g, "Waiting for signal", 20, true, Color.White, x + 24, y + 18);
             for (int i = 0; i < 3; i++)
-                using (SolidBrush db = new SolidBrush(i == capWaitTick % 3 ? Yellow : Dim)) g.FillEllipse(db, x + 390 + i * 26, y + 46, 14, 14);
-            Txt(g, capDevice + ":  turn on or wake the source", 26, false, Color.FromArgb(220, 222, 226), x + 40, y + 86);
-            Txt(g, "F7  ClipGuard      Back  library", 20, false, Grey, x + 40, y + 144);
+                using (SolidBrush db = new SolidBrush(i == capWaitTick % 3 ? Yellow : Dim)) g.FillEllipse(db, x + 300 + i * 22, y + 28, 11, 11);
+        }
+
+        // 2.74.0: in Video Processor the remote's buttons go to the Kaleidescape, as its own
+        // control-protocol commands. F7 (ClipGuard), I (info) and F4 / Ctrl+M stay with the player.
+        // ---- 2.86.2: the XMC-2's menu from the remote (for its lip sync) -------------------
+        // Ctrl+L or the learned Lip sync button opens the XMC-2's own menu over the network;
+        // then the arrows and OK go to the XMC-2 (not the Kaleidescape) until Back closes it.
+        bool xmcMenu;
+
+        bool XmcMenuKey(Keys k, bool ctrl)
+        {
+            if (ctrl && k == Keys.L)
+            {
+                if (xmc == null || !xmc.Ready) { Say("The XMC-2 is not found on the network", 3000); return true; }
+                xmc.Nav("menu");
+                xmcMenu = !xmcMenu;
+                Kick();
+                return true;
+            }
+            if (!xmcMenu || ctrl) return false;
+            switch (k)
+            {
+                case Keys.Up: xmc.Nav("up"); return true;
+                case Keys.Down: xmc.Nav("down"); return true;
+                case Keys.Left: xmc.Nav("left"); return true;
+                case Keys.Right: xmc.Nav("right"); return true;
+                case Keys.Enter: case Keys.Space: xmc.Nav("enter"); return true;
+                case Keys.Escape: case Keys.Back: case Keys.BrowserBack:
+                    xmc.Nav("menu");
+                    xmcMenu = false;
+                    Kick();
+                    return true;
+            }
+            return false;
+        }
+
+        void DrawXmcMenuCard(Graphics g, float W)
+        {
+            const float w = 760, h = 96;
+            float x = 50, y = 1080 - h - 50;
+            using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, x, y, w, h);
+            using (SolidBrush yb = new SolidBrush(Yellow)) g.FillRectangle(yb, x, y, w, 4);
+            Txt(g, "XMC-2 menu", 22, true, Color.White, x + 24, y + 16);
+            Txt(g, "Arrows and OK go to the XMC-2 (Setup > lip sync).   Back: close the menu", 16, false, Grey, x + 24, y + 56);
+        }
+
+        string CapHelp()
+        {
+            return PHost != null && PHost.KscapeReady()
+                ? "Remote: Kaleidescape      F7  ClipGuard      I  info      Ctrl+L  XMC-2 menu      Ctrl+M / F4  library"
+                : "F7  ClipGuard      I  info      Back  library";
+        }
+
+        bool KscapeKey(Keys k)
+        {
+            if (PHost == null || !PHost.KscapeReady()) return false;
+            string c = null;
+            switch (k)
+            {
+                case Keys.Up: c = "UP"; break;
+                case Keys.Down: c = "DOWN"; break;
+                case Keys.Left: c = "LEFT"; break;
+                case Keys.Right: c = "RIGHT"; break;
+                case Keys.Enter: c = "SELECT"; break;
+                case Keys.Back: case Keys.BrowserBack: case Keys.Escape: c = "CANCEL"; break;
+                case Keys.Apps: c = "MENU_TOGGLE"; break;
+                case Keys.MediaPlayPause: case Keys.Space: c = PHost.KscapeMode() == 2 ? "PAUSE" : "PLAY"; break;
+                case Keys.Play: c = "PLAY"; break;
+                case Keys.Pause: c = "PAUSE"; break;
+                case Keys.MediaStop: c = "STOP"; break;
+                case Keys.MediaNextTrack: c = "NEXT"; break;
+                case Keys.MediaPreviousTrack: c = "PREVIOUS"; break;
+            }
+            if (c == null) return false;
+            PHost.KscapeSend(c);
+            return true;
         }
 
         void DrawCapCard(Graphics g, float W)
@@ -2202,7 +2804,7 @@ namespace ClipGuard
             using (SolidBrush yb = new SolidBrush(Yellow)) g.FillRectangle(yb, x, y, w, 5);
             Txt(g, capTitle, 34, true, Color.White, x + 40, y + 28);
             Txt(g, capLine, 26, false, Color.FromArgb(220, 222, 226), x + 40, y + 84);
-            Txt(g, "F7  ClipGuard      I  info      Back  library", 20, false, Grey, x + 40, y + 136);
+            Txt(g, CapHelp(), 20, false, Grey, x + 40, y + 136);
         }
 
         void CaptureTick()
@@ -2221,7 +2823,10 @@ namespace ClipGuard
             catch (Exception) { }
             // 2.70.0: Waiting for signal stays up until the picture comes; then Info (and
             // again whenever the source changes format).
-            if (locked == 0 && (DateTime.Now - capStarted).TotalSeconds > 3)
+            // 2.82.0: no Info on its own (I or Home shows it); Waiting only after 3 s without a picture.
+            if (locked == 0 && capNoSigSince == DateTime.MinValue) capNoSigSince = DateTime.Now;
+            if (locked != 0) capNoSigSince = DateTime.MinValue;
+            if (locked == 0 && (DateTime.Now - capStarted).TotalSeconds > 3 && (DateTime.Now - capNoSigSince).TotalSeconds > 3)
             {
                 capWaiting = true; capInfo = false; capWaitTick++;
                 capUntil = DateTime.Now.AddMilliseconds(2500);
@@ -2231,7 +2836,8 @@ namespace ClipGuard
             else if (locked == 1)
             {
                 string sig = sW + "x" + sH + "@" + sNum + "/" + sDen + " " + sDr + " " + sCs + " " + sDepth + " " + sChroma + " " + sIl;
-                if (capWaiting || sig != capSig) { capSig = sig; ShowInfo(8000); }
+                if (capWaiting) { capWaiting = false; capUntil = DateTime.Now; Kick(); }
+                capSig = sig;
             }
             if (locked >= 0) capLockedLast = locked;
             FrmCaptureTick();   // 2.65.0: frame rate matching
@@ -2241,19 +2847,24 @@ namespace ClipGuard
         bool CaptureKey(Keys k, bool ctrl)
         {
             if (ctrl && k == Keys.S) { StopCapture(); return true; }
+            if (ctrl && k == Keys.M) { StopCapture(); return true; }               // 2.74.0: Media Player button
+            if (ctrl && k == Keys.V) { if (capWaiting) Kick(); else ShowInfo(3000); return true; }   // already here
+            // 2.74.0: the remote controls the Kaleidescape (when one answers on the network).
+            if (!ctrl && KscapeKey(k)) return true;
             if (ctrl) return false;
             switch (k)
             {
-                case Keys.Escape: Quit(); return true;
-                case Keys.F4: case Keys.Back: case Keys.BrowserBack: case Keys.MediaStop: StopCapture(); return true;
-                case Keys.I: if (capWaiting) Kick(); else ShowInfo(8000); return true;   // 2.70.0: Info
+                case Keys.Escape: case Keys.F4: case Keys.Back: case Keys.BrowserBack: case Keys.MediaStop: StopCapture(); return true;   // 2.73.0: Esc is Back
+                case Keys.I: if (capWaiting) Kick(); else if (capInfo) { capInfo = false; capUntil = DateTime.Now; Kick(); } else ShowInfo(3000); return true;   // 2.79.0: I again hides it   // 2.70.0: Info
             }
             return false;
         }
 
         public void StopCapture()
         {
+            if (xmcMenu) { try { if (xmc != null) xmc.Nav("menu"); } catch (Exception) { } xmcMenu = false; }   // 2.86.2
             if (!capturing) return;
+            XmcSwitch(false);   // 2.75.0: the XMC-2 to the Media Player input
             playTimer.Stop();
             try { Engine.StartDevice(""); } catch (Exception) { }
             try { Engine.Cmd("{\"a\":\"stopgraph\"}"); } catch (Exception) { }
@@ -2292,8 +2903,444 @@ namespace ClipGuard
             using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, r);
             Txt(g, "Start   (Enter or F4)", 28, true, Color.White, 126, 472);
             if (!navFocus) Focus(g, r);
-            Txt(g, "While it runs:  F7 ClipGuard menu,   I  info,   Back / F4  library,   Esc  close the player.", 22, false, Grey, 96, 580);
+            Txt(g, "While it runs:  F7 ClipGuard menu,   I  info,   Media Player button (Ctrl+M) or F4  library;  with a Kaleidescape the remote controls it.", 22, false, Grey, 96, 580);
         }
+
+
+#if PLAYER
+        // ---- 2.75.0: Emotiva XMC-2 over its network control protocol (3.0) -----------------
+        // Found like Emotiva's own apps find it (emotivaPing to UDP 7000, the answer on 7001; the
+        // last address is tried first). Commands go to its control port (7002); it reports volume,
+        // mute, input and the sound it is decoding as notifications (7003) once subscribed.
+        sealed class Xmc2 : IDisposable
+        {
+            public volatile string IP;
+            public volatile string Volume = "", Mute = "", Source = "", Format = "", Mode = "";
+            public Action<string> Changed;     // a property changed (called on a background thread)
+            public Action Found;               // 2.76.0: the XMC-2 was found (once; background thread)
+            string lastIp;
+            volatile bool quit;
+            UdpClient ctl, ntf;
+            Thread worker;
+
+            public Xmc2(string lastIp)
+            {
+                this.lastIp = string.IsNullOrEmpty(lastIp) ? null : lastIp;
+                worker = new Thread(Run);
+                worker.IsBackground = true;
+                worker.Start();
+            }
+
+            bool bindLogged;
+            public bool Ready { get { return IP != null && ctl != null; } }   // 2.79.0
+
+            static UdpClient Bind(int port)
+            {
+                UdpClient u = new UdpClient();
+                u.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                u.Client.Bind(new IPEndPoint(IPAddress.Any, port));
+                return u;
+            }
+
+            void Run()
+            {
+                DateTime nextSub = DateTime.MinValue;
+                while (!quit)
+                {
+                    try
+                    {
+                        if (IP == null)
+                        {
+                            string ip = Discover();
+                            if (ip == null) { for (int i = 0; i < 300 && !quit; i++) Thread.Sleep(100); continue; }
+                            // 2.79.0: open both sockets first and only then count the XMC-2 as found.
+                            // Before, IP was set first; if a bind failed (an earlier player still
+                            // holding the port), the XMC-2 looked found with no way to send, and the
+                            // volume keys were taken from Windows and went nowhere.
+                            UdpClient c = null, n = null;
+                            try { c = Bind(7002); n = Bind(7003); }
+                            catch (Exception ex)
+                            {
+                                try { if (c != null) c.Close(); } catch (Exception) { }
+                                try { if (n != null) n.Close(); } catch (Exception) { }
+                                if (!bindLogged) { bindLogged = true; PlayerProgram.LogCrash("XMC-2: could not open the control port (retrying)", ex); }
+                                for (int i = 0; i < 50 && !quit; i++) Thread.Sleep(100);
+                                continue;
+                            }
+                            ctl = c; ntf = n;
+                            IP = ip;
+                            StartReader(ctl);
+                            StartReader(ntf);
+                            nextSub = DateTime.MinValue;
+                            Action f = Found;
+                            if (f != null) try { f(); } catch (Exception) { }
+                        }
+                        if (DateTime.Now >= nextSub)
+                        {
+                            nextSub = DateTime.Now.AddSeconds(60);
+                            const string props = "<power /><volume /><mute /><source /><audio_input /><audio_bitstream /><mode />";
+                            Send("<?xml version=\"1.0\" encoding=\"utf-8\"?><emotivaSubscription protocol=\"3.0\">" + props + "</emotivaSubscription>");
+                            Send("<?xml version=\"1.0\" encoding=\"utf-8\"?><emotivaUpdate protocol=\"3.0\">" + props + "</emotivaUpdate>");
+                        }
+                    }
+                    catch (Exception) { }
+                    for (int i = 0; i < 10 && !quit; i++) Thread.Sleep(100);
+                }
+            }
+
+            string Discover()
+            {
+                UdpClient u = null;
+                try
+                {
+                    u = Bind(7001);
+                    u.EnableBroadcast = true;
+                    u.Client.ReceiveTimeout = 2000;
+                    byte[] ping = Encoding.UTF8.GetBytes("<?xml version=\"1.0\" encoding=\"utf-8\"?><emotivaPing protocol=\"3.0\"/>");
+                    if (lastIp != null) try { u.Send(ping, ping.Length, lastIp, 7000); } catch (Exception) { }
+                    u.Send(ping, ping.Length, new IPEndPoint(IPAddress.Broadcast, 7000));
+                    DateTime until = DateTime.Now.AddSeconds(2.5);
+                    while (DateTime.Now < until)
+                    {
+                        IPEndPoint ep = new IPEndPoint(IPAddress.Any, 0);
+                        byte[] r;
+                        try { r = u.Receive(ref ep); } catch (SocketException) { break; }
+                        if (Encoding.UTF8.GetString(r).IndexOf("emotivaTransponder", StringComparison.Ordinal) >= 0) return ep.Address.ToString();
+                    }
+                }
+                catch (Exception) { }
+                finally { if (u != null) try { u.Close(); } catch (Exception) { } }
+                return null;
+            }
+
+            void StartReader(UdpClient u)
+            {
+                Thread t = new Thread(delegate()
+                {
+                    while (!quit)
+                    {
+                        try
+                        {
+                            IPEndPoint ep = new IPEndPoint(IPAddress.Any, 0);
+                            byte[] r = u.Receive(ref ep);
+                            Parse(Encoding.UTF8.GetString(r));
+                        }
+                        catch (Exception) { if (quit) return; Thread.Sleep(200); }
+                    }
+                });
+                t.IsBackground = true;
+                t.Start();
+            }
+
+            // <property name="volume" value="-30.0" .../> (protocol 3) or <volume value="-30.0" .../> (2).
+            void Parse(string x)
+            {
+                if (x.IndexOf("lip", StringComparison.OrdinalIgnoreCase) >= 0 || x.IndexOf("delay", StringComparison.OrdinalIgnoreCase) >= 0)
+                    XLog(x.Length > 1500 ? x.Substring(0, 1500) : x);   // 2.86.2: the lip sync probe's answer
+                foreach (Match m in Regex.Matches(x, "<property\\s+name=\"(\\w+)\"\\s+value=\"([^\"]*)\""))
+                    Set(m.Groups[1].Value, m.Groups[2].Value);
+                foreach (Match m in Regex.Matches(x, "<(\\w+)\\s+value=\"([^\"]*)\""))
+                    if (m.Groups[1].Value != "property") Set(m.Groups[1].Value, m.Groups[2].Value);
+            }
+
+            void Set(string name, string v)
+            {
+                v = v.Trim();
+                switch (name)
+                {
+                    case "volume": Volume = v; break;
+                    case "mute": Mute = v; break;
+                    case "source": Source = v; break;
+                    case "audio_bitstream": Format = v; break;
+                    case "audio_input": if (Format.Length == 0) Format = v; break;
+                    case "mode": Mode = v; break;
+                    default: return;
+                }
+                Action<string> c = Changed;
+                if (c != null) try { c(name); } catch (Exception) { }
+            }
+
+            void Send(string xml)
+            {
+                string ip = IP;
+                UdpClient u = ctl;
+                if (ip == null || u == null) return;
+                byte[] b = Encoding.UTF8.GetBytes(xml);
+                try { u.Send(b, b.Length, ip, 7002); } catch (Exception) { }
+            }
+
+            void Control(string command, string value)
+            {
+                Send("<?xml version=\"1.0\" encoding=\"utf-8\"?><emotivaControl><" + command + " value=\"" + value + "\" ack=\"no\" /></emotivaControl>");
+            }
+
+            public void Input(int hdmi) { if (hdmi >= 1 && hdmi <= 8) Control("hdmi" + hdmi.ToString(CultureInfo.InvariantCulture), "0"); }
+            public void VolumeStep(int dir) { Control("volume", dir > 0 ? "1" : "-1"); }
+            public void MuteToggle() { Control("mute", "0"); }
+            public void PowerOn() { Control("power_on", "0"); }      // 2.76.0
+            // 2.86.2: the XMC-2's own menu: menu (opens / closes), up, down, left, right, enter.
+            public void Nav(string command) { Control(command, "0"); }
+
+            // 2.86.2: asks whether the XMC-2 offers a lip sync / audio delay property; the answers
+            // go to xmc.log, so a direct command can be added once its name is known.
+            public void ProbeLipSync()
+            {
+                Send("<?xml version=\"1.0\" encoding=\"utf-8\"?><emotivaUpdate protocol=\"3.0\"><lip_sync /><lipsync /><lip_sync_delay /><audio_delay /><delay /></emotivaUpdate>");
+            }
+
+            static void XLog(string line)
+            {
+                try
+                {
+                    string p = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipGuard", "xmc.log");
+                    FileInfo fi = new FileInfo(p);
+                    if (fi.Exists && fi.Length > 200000) File.Delete(p);
+                    File.AppendAllText(p, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "  " + line + "\r\n");
+                }
+                catch (Exception) { }
+            }
+            public void PowerOff() { Control("power_off", "0"); }    // 2.76.0: standby
+
+            public void Dispose()
+            {
+                quit = true;
+                try { if (ctl != null) ctl.Close(); } catch (Exception) { }
+                try { if (ntf != null) ntf.Close(); } catch (Exception) { }
+            }
+        }
+
+        Xmc2 xmc;
+        DateTime volShownAt = DateTime.MinValue;
+
+        void XmcStart()
+        {
+            if (xmc != null) return;
+            xmc = new Xmc2(Ini("XmcLastIP", ""));
+            // 2.76.0: when the XMC-2 is found, turn it on and put it on the input for where the
+            // player is (the Media Player input, or Video Processor's when capturing). The input is
+            // sent again a few seconds later, for an XMC-2 still waking from standby.
+            xmc.Found = delegate
+            {
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (xmc == null || xmc.IP == null) return;
+                        try { xmc.ProbeLipSync(); } catch (Exception) { }   // 2.86.2
+                        if (XmcInput(false) == 0 && XmcInput(true) == 0) return;   // only once the user has set it up
+                        xmc.PowerOn();
+                        XmcSwitch(capturing);
+                        foreach (int ms in new[] { 4000, 12000 })
+                        {
+                            System.Windows.Forms.Timer t = new System.Windows.Forms.Timer();
+                            t.Interval = ms;
+                            t.Tick += delegate { t.Stop(); t.Dispose(); if (!quitting) XmcSwitch(capturing); };
+                            t.Start();
+                        }
+                    });
+                }
+                catch (Exception) { }
+            };
+            xmc.Changed = delegate(string name)
+            {
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (xmc.IP != null && Ini("XmcLastIP", "") != xmc.IP) SetIni("XmcLastIP", xmc.IP);
+                        if ((name == "volume" || name == "mute") && (DateTime.Now - volShownAt).TotalSeconds < 3) ShowVolume();   // 2.81.0: the new level
+
+                    });
+                }
+                catch (Exception) { }
+            };
+        }
+
+        // 0 = Off (don't switch), 1..8 = HDMI n. Test build defaults: Video Processor HDMI 4,
+        // Media Player HDMI 3; the public build switches nothing until it is set.
+        int XmcInput(bool videoProcessor)
+        {
+            string def = "0";
+            int v;
+            if (!int.TryParse(Ini(videoProcessor ? "XmcVideoProcessorInput" : "XmcMediaPlayerInput", def), NumberStyles.Integer, CultureInfo.InvariantCulture, out v)) v = 0;
+            return Math.Max(0, Math.Min(8, v));
+        }
+        static string XmcInputName(int v) { return v <= 0 ? "Off (don't switch)" : "HDMI " + v.ToString(CultureInfo.InvariantCulture); }
+        string XmcState() { return xmc != null && xmc.IP != null ? "   (XMC-2 at " + xmc.IP + ")" : "   (XMC-2 not found yet)"; }
+
+        void XmcSwitch(bool videoProcessor)
+        {
+            if (xmc == null || xmc.IP == null) return;
+            int v = XmcInput(videoProcessor);
+            if (v > 0) xmc.Input(v);
+        }
+
+        // Volume and mute from the remote or keyboard: to the XMC-2 when it is found (true),
+        // otherwise left to Windows (false).
+        bool XmcVolumeKey(Keys k)
+        {
+            if (xmc == null || !xmc.Ready) return false;
+            if (k == Keys.VolumeUp) xmc.VolumeStep(1);
+            else if (k == Keys.VolumeDown) xmc.VolumeStep(-1);
+            else if (k == Keys.VolumeMute) xmc.MuteToggle();
+            else return false;
+            volShownAt = DateTime.Now;
+            ShowVolume();   // 2.81.0: our card again (the XMC-2's own does not always show)
+            return true;
+        }
+
+        // ---- 2.77.0: volume buttons go only to the XMC-2 ------------------------------------
+        // Windows acts on volume keys before any program sees them (its own volume and slider).
+        // While the player is in front and the XMC-2 is found, a low-level keyboard hook takes
+        // them first, sends them to the XMC-2, and Windows never gets them. Otherwise they pass.
+        delegate IntPtr LowLevelProc(int nCode, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int idHook, LowLevelProc fn, IntPtr hMod, uint threadId);
+        [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hook);
+        [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hook, int nCode, IntPtr wParam, IntPtr lParam);
+        [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
+        LowLevelProc volProc;   // kept alive while the hook is installed
+        IntPtr volHook = IntPtr.Zero;
+
+        void VolumeHookStart()
+        {
+            if (volHook != IntPtr.Zero) return;
+            volProc = VolumeHookProc;
+            try { volHook = SetWindowsHookEx(13 /* WH_KEYBOARD_LL */, volProc, GetModuleHandle(null), 0); } catch (Exception) { volHook = IntPtr.Zero; }
+        }
+
+        void VolumeHookStop()
+        {
+            if (volHook == IntPtr.Zero) return;
+            try { UnhookWindowsHookEx(volHook); } catch (Exception) { }
+            volHook = IntPtr.Zero;
+        }
+
+        IntPtr VolumeHookProc(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            try
+            {
+                // 2.82.0: the remote's Home button (browser home) is Banner while the player is in
+                // front: Windows never sees it, so it cannot open a browser or leave the player.
+                if (nCode >= 0 && Marshal.ReadInt32(lParam) == 0xAC)
+                {
+                    uint hp;
+                    GetWindowThreadProcessId(GetForegroundWindow(), out hp);
+                    if (OurWindow(hp))
+                    {
+                        int hm = wParam.ToInt32();
+                        if (hm == 0x100 || hm == 0x104) BeginInvoke((MethodInvoker)delegate { BannerKey(); });
+                        return (IntPtr)1;
+                    }
+                }
+                if (nCode >= 0 && xmc != null && xmc.Ready)
+                {
+                    int vk = Marshal.ReadInt32(lParam);
+                    if (vk == 0xAF || vk == 0xAE || vk == 0xAD)   // volume up, down, mute
+                    {
+                        uint pid;
+                        GetWindowThreadProcessId(GetForegroundWindow(), out pid);
+                        if (OurWindow(pid))
+                        {
+                            int msg = wParam.ToInt32();
+                            if (msg == 0x100 || msg == 0x104)   // key down (repeats included)
+                            {
+                                Keys k = vk == 0xAF ? Keys.VolumeUp : (vk == 0xAE ? Keys.VolumeDown : Keys.VolumeMute);
+                                BeginInvoke((MethodInvoker)delegate { XmcVolumeKey(k); });
+                            }
+                            return (IntPtr)1;   // Windows does not see it
+                        }
+                    }
+                }
+            }
+            catch (Exception) { }
+            return CallNextHookEx(volHook, nCode, wParam, lParam);
+        }
+
+        // 2.79.0: the player's own windows, and the video engine's (Unplugged.exe), which is in
+        // front during Video Processor and films.
+        uint ourEnginePid;
+        bool OurWindow(uint pid)
+        {
+            if (pid == 0) return false;
+            if (pid == (uint)Process.GetCurrentProcess().Id) return true;
+            if (pid == ourEnginePid) return true;
+            try
+            {
+                using (Process p = Process.GetProcessById((int)pid))
+                    if (p.ProcessName.Equals("Unplugged", StringComparison.OrdinalIgnoreCase)) { ourEnginePid = pid; return true; }
+            }
+            catch (Exception) { }
+            return false;
+        }
+
+        // 2.83.0: the Home button is F6: ClipGuard's info banner at the top (films and Video Processor).
+        void BannerKey()
+        {
+            try { if (player != null && PHost != null) PHost.ToggleClipGuardBanner(); } catch (Exception) { }
+        }
+
+        bool XmcAppCommand(int cmd)
+        {
+            return cmd == 10 ? XmcVolumeKey(Keys.VolumeUp) : cmd == 9 ? XmcVolumeKey(Keys.VolumeDown) : cmd == 8 ? XmcVolumeKey(Keys.VolumeMute) : false;
+        }
+
+        // 2.81.0: our volume card, bottom centre, 2 seconds: library, films and Video Processor.
+        DateTime volUntil = DateTime.MinValue;
+        System.Windows.Forms.Timer volTimer;
+        void ShowVolume()
+        {
+            volUntil = DateTime.Now.AddMilliseconds(2000);
+            if (volTimer == null)
+            {
+                volTimer = new System.Windows.Forms.Timer();
+                volTimer.Interval = 250;
+                volTimer.Tick += delegate { if (DateTime.Now >= volUntil) volTimer.Stop(); Invalidate(); Kick(); };
+            }
+            volTimer.Start();
+            Invalidate();
+            Kick();
+        }
+
+        bool VolumeOn() { return DateTime.Now < volUntil && xmc != null; }
+
+        void DrawVolume(Graphics g, float W)
+        {
+            if (!VolumeOn()) return;
+            bool muted = xmc.Mute.Equals("On", StringComparison.OrdinalIgnoreCase) || xmc.Mute == "1" || xmc.Mute.Equals("true", StringComparison.OrdinalIgnoreCase);
+            double db;
+            bool have = double.TryParse(xmc.Volume, NumberStyles.Float, CultureInfo.InvariantCulture, out db);
+            // 2.83.0: second line: input, what it is decoding, listening mode
+            List<string> parts = new List<string>();
+            string src = xmc.Source.Trim();
+            if (src.Length > 0) parts.Add(Regex.IsMatch(src, "^(hdmi)?\\s*\\d$", RegexOptions.IgnoreCase) ? "HDMI " + Regex.Match(src, "\\d").Value : src);
+            if (xmc.Format.Trim().Length > 0) parts.Add(xmc.Format.Trim());
+            if (xmc.Mode.Trim().Length > 0 && xmc.Format.IndexOf(xmc.Mode.Trim(), StringComparison.OrdinalIgnoreCase) < 0) parts.Add(xmc.Mode.Trim());
+            string info = string.Join("  \u00B7  ", parts.ToArray());
+            const float w = 720;
+            float h = info.Length > 0 ? 142 : 104;
+            float x = (W - w) / 2, y = (player != null && BarOn()) ? 1080 - 330 - h : 1080 - h - 60;
+            using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, x, y, w, h);
+            using (SolidBrush yb = new SolidBrush(Yellow)) g.FillRectangle(yb, x, y, w, 5);
+            Txt(g, "Volume", 26, true, Color.White, x + 32, y + 22);
+            string v = muted ? "Muted" : (have ? db.ToString("0.0", CultureInfo.InvariantCulture) + " dB" : "...");
+            TxtR(g, v, 26, true, muted ? Yellow : Color.White, x + w - 32, y + 22);
+            // level: -80 dB at empty, +11 dB at full (the XMC-2's top)
+            float f = have ? (float)Math.Max(0, Math.Min(1, (db + 80) / 91.0)) : 0;
+            RectangleF track = new RectangleF(x + 32, y + 72, w - 64, 10);
+            using (SolidBrush tb = new SolidBrush(Dim)) g.FillRectangle(tb, track);
+            using (SolidBrush fb = new SolidBrush(muted ? Grey : Color.White)) g.FillRectangle(fb, track.X, track.Y, track.Width * f, track.Height);
+            if (info.Length > 0) TextBox(g, info, 20, false, Grey, new RectangleF(x + 32, y + 96, w - 64, 30));
+        }
+
+        // What the XMC-2 is decoding, for Info and the film's bar ("" when unknown).
+        string XmcFormat()
+        {
+            if (xmc == null || xmc.IP == null) return "";
+            string f = xmc.Format, m = xmc.Mode;
+            if (f.Length == 0) return m;
+            return m.Length > 0 && f.IndexOf(m, StringComparison.OrdinalIgnoreCase) < 0 ? f + ", " + m : f;
+        }
+#endif
 
         // ---- 2.71.0: the card's input on the Video Processor page --------------------------
         [StructLayout(LayoutKind.Sequential)]
@@ -2407,6 +3454,7 @@ namespace ClipGuard
                 string key = UnpluggedSettings.PRows[rows[picIdx]].Key;
                 if (key == "!startin") SetIni("StartIn", Ini("StartIn", "Library") == "VideoProcessor" ? "Library" : "VideoProcessor");
                 else if (key == "!frm") SetIni("MatchFrameRate", FrmOn() ? "0" : "1");
+                else if (key == "!ssr") { if (PHost != null) PHost.SetSsr(!PHost.Ssr()); }   // 2.85.0
                 else if (key == "!calrun") { if (k == Keys.Enter) CalBegin(); }
                 else if (key == "!lut") LutStep(dir);
                 else if (key == "!caldir") { }
@@ -2437,6 +3485,7 @@ namespace ClipGuard
         {
             if (key == "!startin") return Ini("StartIn", "Library") == "VideoProcessor" ? "Video Processor" : "Library";
             if (key == "!frm") return FrmOn() ? "On" : "Off";
+            if (key == "!ssr") return PHost != null && PHost.Ssr() ? "On" : "Off";   // 2.85.0
             if (key == "!copy") return "Press Enter";
             if (key == "!calrun") return "Press Enter";
             if (key == "!lut") return LutName(UnpluggedSettings.LutFile());
@@ -2627,7 +3676,7 @@ namespace ClipGuard
             try { fps = EngineFps(true); } catch (Exception) { }
             if (fps <= 1 || Math.Abs(fps - capFpsLast) < 0.01) return;
             capFpsLast = fps;
-            if (FrmApply(fps)) ShowInfo(8000);   // 2.70.0: Info shows the projector's new rate
+            FrmApply(fps);   // 2.82.0: no Info on its own   // 2.70.0: Info shows the projector's new rate
         }
 
         // ---- 2.66.0: Calibrate a projector (any projector, by name) --------------------------
@@ -3092,6 +4141,7 @@ namespace ClipGuard
 
         void Launch(string file, long startMs, Movie m, bool lip)
         {
+            XmcSwitch(false);   // 2.75.0: films play through the Media Player input
             playing = m;
             lipSync = lip;
             lipDelta = 0;
@@ -3128,8 +4178,8 @@ namespace ClipGuard
                 if (rc != 0)
                 {
                     player = null;
-                    scr = lip ? Screen2.Settings : Screen2.Details;
-                    message = "The player could not open " + (lip ? "the lip sync clip" : "\"" + m.Title + "\"") + " (0x" + rc.ToString("X8") + "). The engine's log: " + Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".unplugged", "logs", "engine.log");
+                    scr = lip || m == null ? Screen2.Settings : Screen2.Details;
+                    message = "The player could not open " + (lip ? "the lip sync clip" : (m == null ? "\"" + Path.GetFileName(f) + "\"" : "\"" + m.Title + "\"")) + " (0x" + rc.ToString("X8") + "). The engine's log: " + Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".unplugged", "logs", "engine.log");
                     ShowOverVideo();   // 2.70.0
                     return;
                 }
@@ -3143,7 +4193,7 @@ namespace ClipGuard
                 playTimer.Interval = 500;
                 playTimer.Start();
                 if (lip) Say("Lip sync test:  where is the yellow marker at the beep?  Left / Right moves the sound 10 ms (beep on the left: Right),  Enter saves,  Esc leaves", 10000);
-                else
+                else if (m != null)
                 {
                     ShowBar(5000);
                     LoadArtwork(m, curVer);
@@ -3315,7 +4365,7 @@ namespace ClipGuard
 
         bool PreviewOn() { return seekTarget >= 0 && DateTime.Now < seekHold; }
         bool BarOn() { return !lipSync && playing != null && (DateTime.Now < barUntil || paused || PreviewOn()); }
-        bool OverlayWanted() { return player != null && (DateTime.Now < msgUntil || BarOn() || menuOpen || (capturing && DateTime.Now < capUntil)); }
+        bool OverlayWanted() { return player != null && (DateTime.Now < msgUntil || VolumeOn() || xmcMenu || BarOn() || menuOpen || (capturing && DateTime.Now < capUntil)); }
 
         long PosMs() { return PreviewOn() ? seekTarget / 10000 : Math.Max(0, lastPos); }
         long DurMs() { return Math.Max(lastDur, playing != null ? playing.Duration : 0); }
@@ -3323,7 +4373,10 @@ namespace ClipGuard
         // Keys on the picture. True when the key was used.
         public bool PlayerKey(Keys k, bool shift, bool ctrl)
         {
-            if (player == null) { if (k == Keys.Escape && !ctrl) { Quit(); return true; } return false; }
+            if (player == null) return false;   // 2.73.0: Esc no longer closes the player
+            if (!ctrl && !shift && XmcVolumeKey(k)) return true;   // 2.75.0
+            if (capturing && shift && !ctrl && (k == Keys.Right || k == Keys.Left) && PHost != null && PHost.KscapeReady())
+            { PHost.KscapeSend(k == Keys.Right ? "SCAN_FORWARD" : "SCAN_REVERSE"); return true; }   // 2.74.0: skip buttons
             if (capturing) return CaptureKey(k, ctrl);
             if (menuOpen) return MenuKey(k);
             if (lipSync)
@@ -3354,8 +4407,7 @@ namespace ClipGuard
             }
             switch (k)
             {
-                case Keys.Escape: Quit(); return true;
-                case Keys.F4: case Keys.Back: case Keys.BrowserBack: case Keys.MediaStop: StopFilm(false); return true;
+                case Keys.Escape: case Keys.F4: case Keys.Back: case Keys.BrowserBack: case Keys.MediaStop: StopFilm(false); return true;   // 2.73.0: Esc is Back
                 case Keys.Space: case Keys.Enter: case Keys.MediaPlayPause: TogglePause(); return true;
                 case Keys.Play: Play(true); return true;
                 case Keys.Pause: Play(false); return true;
@@ -3371,8 +4423,7 @@ namespace ClipGuard
                         Skip(dir * (shift ? 60 : 10));
                         return true;
                     }
-                case Keys.Up: Skip(60); return true;
-                case Keys.Down: Skip(-60); return true;
+                case Keys.Up: case Keys.Down: return true;   // 2.80.0: free (2.82.0: Up no longer shows the banner)
                 case Keys.PageUp: case Keys.MediaPreviousTrack: ChapterJump(-1); return true;
                 case Keys.PageDown: case Keys.MediaNextTrack: ChapterJump(1); return true;
                 case Keys.Home: SeekTo(0); return true;
@@ -3400,7 +4451,19 @@ namespace ClipGuard
         // Remote buttons that arrive as WM_APPCOMMAND.
         public bool PlayerAppCommand(int cmd)
         {
+#if PLAYER
+            if (XmcAppCommand(cmd)) return true;   // 2.75.0
+#endif
             if (player == null) return false;
+            if (cmd == 7) { BannerKey(); return true; }   // 2.83.0: Home (browser home) is F6
+            if (capturing)
+            {
+                // 2.74.0: media buttons sent as WM_APPCOMMAND, in Video Processor.
+                Keys t = cmd == 14 ? Keys.MediaPlayPause : cmd == 46 ? Keys.Play : cmd == 47 ? Keys.Pause : cmd == 13 ? Keys.MediaStop
+                    : cmd == 11 ? Keys.MediaNextTrack : cmd == 12 ? Keys.MediaPreviousTrack : cmd == 1 ? Keys.BrowserBack : Keys.None;
+                if (cmd == 49 || cmd == 50) return PlayerKey(cmd == 49 ? Keys.Right : Keys.Left, true, false);
+                return t != Keys.None && CaptureKey(t, false);
+            }
             switch (cmd)
             {
                 case 14: return PlayerKey(Keys.MediaPlayPause, false, false);   // play / pause
@@ -3531,12 +4594,14 @@ namespace ClipGuard
 
         bool menuOpen;
         int menuTab, menuIdx;
+        bool menuOnTabs;   // 2.80.0: the highlight is on the Sound / Subtitles row
 
         void OpenMenu(int tab)
         {
             RefreshTracks();
             menuOpen = true;
             menuTab = tab;
+            menuOnTabs = false;
             menuIdx = tab == 0 ? AudioNow() : SubNow() + 1;
             Kick();
         }
@@ -3551,17 +4616,32 @@ namespace ClipGuard
 
         int MenuCount() { return menuTab == 0 ? audioNames.Count + AudioPanels.Length : subNames.Count + 1; }
 
+        // 2.80.0: TV-style: Up from the first line goes to the Sound / Subtitles row, where
+        // Left / Right picks the tab (Left = Sound, Right = Subtitles, so a doubled key press
+        // cannot flip it back); Down or Enter goes back into the list.
         bool MenuKey(Keys k)
         {
             int n = MenuCount();
+            if (menuOnTabs)
+            {
+                switch (k)
+                {
+                    case Keys.Left: case Keys.A: SetMenuTab(0); break;
+                    case Keys.Right: case Keys.S: SetMenuTab(1); break;
+                    case Keys.Down: case Keys.Enter: case Keys.Space: menuOnTabs = false; break;
+                    case Keys.Escape: case Keys.Back: case Keys.BrowserBack: case Keys.F4: case Keys.T: case Keys.Apps:
+                        menuOpen = false; break;
+                    default: return true;
+                }
+                Kick();
+                return true;
+            }
             switch (k)
             {
-                case Keys.Up: if (menuIdx > 0) menuIdx--; break;
+                case Keys.Up: if (menuIdx > 0) menuIdx--; else menuOnTabs = true; break;
                 case Keys.Down: if (menuIdx < n - 1) menuIdx++; break;
-                case Keys.Left: case Keys.Right: case Keys.A: case Keys.S:
-                    menuTab = k == Keys.A ? 0 : k == Keys.S ? 1 : 1 - menuTab;
-                    menuIdx = menuTab == 0 ? AudioNow() : SubNow() + 1;
-                    break;
+                case Keys.A: SetMenuTab(0); break;
+                case Keys.S: SetMenuTab(1); break;
                 case Keys.Enter: case Keys.Space: UseTrack(); menuOpen = false; ShowBar(4000); break;
                 case Keys.Escape: case Keys.Back: case Keys.BrowserBack: case Keys.F4: case Keys.T: case Keys.Apps:
                     menuOpen = false; break;
@@ -3569,6 +4649,13 @@ namespace ClipGuard
             }
             Kick();
             return true;
+        }
+
+        void SetMenuTab(int t)
+        {
+            if (menuTab == t) return;
+            menuTab = t;
+            menuIdx = menuTab == 0 ? AudioNow() : SubNow() + 1;
         }
 
         void UseTrack()
@@ -3767,6 +4854,8 @@ namespace ClipGuard
                 if (menuOpen) DrawMenu(g, W);
                 if (DateTime.Now < msgUntil) DrawMsg(g, W);
                 if (capturing && DateTime.Now < capUntil) DrawCapCard(g, W);
+                if (xmcMenu) DrawXmcMenuCard(g, W);   // 2.86.2
+                DrawVolume(g, W);   // 2.81.0
             }
             catch (Exception) { }
         }
@@ -3845,7 +4934,12 @@ namespace ClipGuard
                 sf.Alignment = StringAlignment.Center;
                 sf.Trimming = StringTrimming.EllipsisCharacter;
                 sf.FormatFlags = StringFormatFlags.NoWrap;
-                g.DrawString("Sound: " + AudioLabel() + "      Subtitles: " + SubLabel(), f, b, new RectangleF(bx + 200, by + 26, bw - 400, 32), sf);
+                string rx = "";
+#if PLAYER
+                rx = XmcFormat();   // 2.75.0: what the XMC-2 is decoding
+                if (rx.Length > 0) rx = "      Receiver: " + rx;
+#endif
+                g.DrawString("Sound: " + AudioLabel() + "      Subtitles: " + SubLabel() + rx, f, b, new RectangleF(bx + 200, by + 26, bw - 400, 32), sf);
             }
             // The picture where a skip lands (Plex's preview thumbnails)
             if (PreviewOn())
@@ -3878,6 +4972,7 @@ namespace ClipGuard
                     SizeF z = g.MeasureString(tabs[i], f);
                     using (SolidBrush b = new SolidBrush(i == menuTab ? Color.White : Grey)) g.DrawString(tabs[i], f, b, tx, my + 30);
                     if (i == menuTab) using (SolidBrush y = new SolidBrush(Yellow)) g.FillRectangle(y, tx + 4, my + 74, z.Width - 8, 4);
+                    if (menuOnTabs && i == menuTab) Focus(g, new RectangleF(tx - 14, my + 22, z.Width + 28, 64));   // 2.80.0
                     tx += z.Width + 48;
                 }
             int cur = menuTab == 0 ? AudioNow() : SubNow() + 1;
@@ -3888,13 +4983,14 @@ namespace ClipGuard
                 string name = menuTab == 0 ? (i < audioNames.Count ? audioNames[i] : AudioPanels[i - audioNames.Count]) : (i == 0 ? "Off" : subNames[i - 1]);
                 float ry = my + 110 + r * row;
                 RectangleF rr = new RectangleF(mx + 30, ry, mw - 60, row - 8);
-                if (i == menuIdx) using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, rr);
+                bool sel = i == menuIdx && !menuOnTabs;
+                if (sel) using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, rr);
                 if (i == cur) Txt(g, "\u25CF", 22, false, Yellow, rr.X + 12, ry + 10);
-                TextBox(g, name, 26, i == cur, i == menuIdx ? Color.White : Color.FromArgb(220, 222, 226), new RectangleF(rr.X + 48, ry + 6, rr.Width - 60, row - 10));
-                if (i == menuIdx) Focus(g, rr);
+                TextBox(g, name, 26, i == cur, sel ? Color.White : Color.FromArgb(220, 222, 226), new RectangleF(rr.X + 48, ry + 6, rr.Width - 60, row - 10));
+                if (sel) Focus(g, rr);
             }
             if (n == 0) Txt(g, "No tracks found yet", 26, false, Grey, mx + 78, my + 116);
-            Txt(g, "Up / Down: choose    Enter: use    Left / Right: Sound / Subtitles    Back: close", 20, false, Grey, mx + 40, my + mh - 50);
+            Txt(g, menuOnTabs ? "Left / Right: Sound / Subtitles    Down: the list    Back: close" : "Up / Down: choose    Enter: use    Up at the top: Sound / Subtitles    Back: close", 20, false, Grey, mx + 40, my + mh - 50);
         }
 
         void DrawMsg(Graphics g, float W)
@@ -3974,6 +5070,8 @@ namespace ClipGuard
             if (quitting) return;
             quitting = true;
 #if PLAYER
+            VolumeHookStop();   // 2.77.0
+            try { if (xmc != null) xmc.Dispose(); } catch (Exception) { }   // 2.81.0: closing the player leaves the XMC-2 on
             // 2.70.0: why the player closed (Esc, the window closed, the source row...), in crash.log.
             try
             {
@@ -4418,7 +5516,7 @@ namespace ClipGuard
                 if (r == null) return "-";
                 if (r.Kind == 4) return string.IsNullOrEmpty(r.File) ? "None" : Path.GetFileName(r.File);
                 if (r.Kind == 0) return r.On ? "On" : "Off";
-                if (r.Key == "out.upscaling" && GetFsr != null && GetFsr()) return "FSRCNNX";
+                if (r.Key == "out.upscaling" && GetFsr != null && GetFsr() > 0) return GetFsr() == 2 ? "ArtCNN C4F32" : "FSRCNNX";
                 if (r.Kind == 2) return p.Names != null && r.Opt >= 0 && r.Opt < p.Names.Length ? p.Names[r.Opt] : r.Opt.ToString(CultureInfo.InvariantCulture);
                 return r.Val.ToString(p.Step < 0.01 ? "0.000" : (p.Step < 0.1 ? "0.00" : (p.Step < 1 ? "0.0" : "0")), CultureInfo.InvariantCulture) + p.Unit;
             }
@@ -4433,8 +5531,8 @@ namespace ClipGuard
                 return Show(Find(rows, p.Key), p);
             }
 
-            public static Func<bool> GetFsr;
-            public static Action<bool> SetFsr;
+            public static Func<int> GetFsr;      // 2.85.0: 0 none, 1 FSRCNNX, 2 ArtCNN C4F32
+            public static Action<int> SetFsr;
 
             public static void PictureStep(int i, int dir)
             {
@@ -4453,11 +5551,12 @@ namespace ClipGuard
                 }
                 else if (r.Key == "out.upscaling" && SetFsr != null)
                 {
-                    // Lanczos3, Jinc2, FSRCNNX (ClipGuard's, with Jinc2 for other sizes).
-                    int cur = (GetFsr != null && GetFsr()) ? 2 : r.Opt;
-                    int o = ((cur + dir) % 3 + 3) % 3;
+                    // Lanczos3, Jinc2, FSRCNNX, ArtCNN C4F32 (the neural ones with Jinc2 for other sizes).
+                    int nn = GetFsr != null ? GetFsr() : 0;
+                    int cur = nn > 0 ? 1 + nn : r.Opt;
+                    int o = ((cur + dir) % 4 + 4) % 4;
                     SetValue(r.Key, (o == 0 ? r.OptVals[0] : r.OptVals[1]).ToString(CultureInfo.InvariantCulture));
-                    SetFsr(o == 2);
+                    SetFsr(o >= 2 ? o - 1 : 0);
                 }
                 else if (r.Kind == 2 && r.NOpts > 0)
                 {
@@ -4784,15 +5883,16 @@ namespace ClipGuard
             for (int id = HK_L; id <= HK_ESC; id++) UnregisterHotKey(Handle, id);
             Movie m = playing;
             bool lip = lipSync;
+            bool fel = false;
             player = null;
             playing = null;
             lipSync = false;
             if (!Visible) { Show(); Activate(); }
-            if (lip)
+            if (lip || fel)
             {
                 scr = Screen2.Settings; tab = TabSettings; navFocus = false;
 #if PLAYER
-                setIdx = 1;   // Lip sync test (2.71.0: one row higher)
+                setIdx = fel ? 12 : 1;   // Lip sync test (2.71.0: one row higher); 2.87.1: FEL test clips
 #else
                 setIdx = 2;
 #endif
@@ -4917,14 +6017,17 @@ namespace ClipGuard
                         else if (scr == Screen2.VP) DrawVP(g);
                         else if (scr == Screen2.Picture) DrawPicture(g);
                         else if (scr == Screen2.ClipGuard) DrawCgTab(g);
+                        else if (scr == Screen2.Power) DrawPower(g);
 #endif
                         else DrawSettings(g);
                         break;
                 }
+                if (sortOpen && (scr == Screen2.Movies || scr == Screen2.Shows)) DrawSortMenu(g);   // 2.86.1
                 if (message.Length > 0) DrawMessage(g);
                 if (learning) DrawLearn(g);
 #if PLAYER
                 if (calState != 0) DrawCalDlg(g);
+                DrawVolume(g, 1920);   // 2.81.0: our volume card
 #endif
             }
             catch (Exception) { }
@@ -5033,11 +6136,11 @@ namespace ClipGuard
             int pos = Math.Max(0, rows.IndexOf(homeRow));
             float y = 130 - Math.Max(0, pos - 1) * 450;
             System.Drawing.Drawing2D.GraphicsState gs = g.Save();
-            g.SetClip(new RectangleF(0, 120, 1920, 960));
+            g.SetClip(new RectangleF(0, 120, 1920, 900));   // 2.83.0: stops above the help line
             string[] names = { "Continue Watching", "Recently Added Movies", "Next Up", "Recently Added TV" };
             foreach (int r in rows)
             {
-                if (y > -400 && y < 1080)
+                if (y > -400 && y < 980)   // 2.83.0: a row starts only if its heading fits above the help line
                 {
                     Txt(g, names[r], 30, true, Color.White, 96, y);
                     List<Movie> l = HomeList(r);
@@ -5078,7 +6181,7 @@ namespace ClipGuard
                     : (m.Year > 0 ? m.Year.ToString(CultureInfo.InvariantCulture) : "");
                 Txt(g, sub, 18, false, Grey, x, y + h + 38);
             }
-            Txt(g, string.Format(CultureInfo.InvariantCulture, "{0} of {1}   (type a letter to jump)", gridIdx + 1, movies.Count), 18, false, Grey, 1420, 1036);
+            Txt(g, string.Format(CultureInfo.InvariantCulture, "{0}   \u00b7   {1} of {2}   (OK on the tab: sort)", SortLabel(), gridIdx + 1, movies.Count), 18, false, Grey, 1240, 1036);   // 2.86.1
         }
 
         void DrawDetails(Graphics g)
@@ -5153,6 +6256,30 @@ namespace ClipGuard
 #endif
         }
 
+#if PLAYER
+        // 2.73.0: Start with Windows: the player in this user's sign-in startup list
+        // (HKCU ...\Run), so no administrator rights are needed.
+        const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run", RunName = "ClipGuard Media Player";
+        static bool StartWithWindows()
+        {
+            try { using (RegistryKey rk = Registry.CurrentUser.OpenSubKey(RunKey)) return rk != null && rk.GetValue(RunName) != null; }
+            catch (Exception) { return false; }
+        }
+        void SetStartWithWindows(bool on)
+        {
+            try
+            {
+                using (RegistryKey rk = Registry.CurrentUser.CreateSubKey(RunKey))
+                {
+                    if (on) rk.SetValue(RunName, "\"" + Application.ExecutablePath + "\"");
+                    else if (rk.GetValue(RunName) != null) rk.DeleteValue(RunName);
+                }
+            }
+            catch (Exception ex) { message = "Windows did not accept the change: " + ex.Message; }
+            Invalidate();
+        }
+#endif
+
         string HelpDelay()
         {
 #if PLAYER
@@ -5171,11 +6298,11 @@ namespace ClipGuard
             for (int i = 0; i < rows.Length; i++)
             {
                 string[] p = rows[i].Split('\t');
-                float y = 140 + i * 80;   // 2.69.0: nine rows (was 88 apart)
-                RectangleF r = new RectangleF(96, y, 1728, 66);
+                float y = 136 + i * 54;   // 2.87.1: fourteen rows (2.86.0: 58 apart, 2.75.0: 64)
+                RectangleF r = new RectangleF(96, y, 1728, 48);
                 using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, r);
-                Txt(g, p[0], 26, true, Color.White, 126, y + 16);
-                TextBox(g, p.Length > 1 ? p[1] : "", 24, false, Grey, new RectangleF(720, y + 18, 1090, 40));
+                Txt(g, p[0], 24, true, Color.White, 126, y + 9);
+                TextBox(g, p.Length > 1 ? p[1] : "", 22, false, Grey, new RectangleF(720, y + 11, 1090, 34));
                 if (!navFocus && i == setIdx) Focus(g, r);
             }
             string help = SetRow() == 0 ? HelpDelay() : SetRow() == 2
@@ -5183,12 +6310,17 @@ namespace ClipGuard
                 : (SetRow() == 3 ? "All servers shows the movies of every server together; or choose one."
                 : (SetRow() == 5 ? "Asks for each button in turn (arrows, OK, Back, Play/Pause, Stop, chapters, skip, Menu) and stores what your remote sends. Wait 8 s to skip a button it doesn't have."
 #if PLAYER
+                : (SetRow() == 9 ? "Five colour themes, all dark for a theatre; the change shows straight away. Focus always has a white outline."
+                : (false ? ""
+                : (SetRow() == 12 ? "A soft tick as you move, a click to select and a lower one to go back, in the library and menus only (never during a film or Video Processor)."
+                : (SetRow() == 10 || SetRow() == 11 ? "When Video Processor starts, and when you go back to the Media Player, the XMC-2 switches to these inputs (Off: it is left alone). Volume and mute on the remote go to the XMC-2 when it is found."
+                : (SetRow() == 8 ? "On: the player opens when you sign in to Windows (with Picture > General > Start in, straight to the library or Video Processor). For no keyboard at all, Windows must also sign in by itself."
                 : (SetRow() == 7 ? "Video Processor plays the capture card's PCM sound (a PS5 game set to Linear PCM) on this PC, held back with the picture. Raise it if the sound is early, lower it if late. Dolby / DTS bitstream on the card is muted."
-                : "")));
+                : ""))))))));
 #else
                 : ""));
 #endif
-            Txt(g, help, 20, false, Grey, 96, 880);
+            Txt(g, help, 20, false, Grey, 96, 926);
         }
 
         void DrawSignIn(Graphics g)

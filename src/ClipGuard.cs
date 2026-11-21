@@ -503,7 +503,7 @@ namespace ClipGuard
             OOverlayOn = 28, OPinned = 32, OSelected = 36, OLastKey = 40, OExeTick = 44,
             ORendTick = 48, OPicture = 52, OSceneNits = 56, OAmount = 60, OCeiling = 64, OKneeEff = 68,
             OOutputPQ = 72, OSrcMax = 76, OClipFrac = 80, OBottomBar = 84, OColorProtect = 88, OFullPct = 92, OTextSkip = 96, OHotSpot = 108, OFixShape = 120, OGrid = 128, OLookAhead = 132,
-            OLogRequest = 136, OLogDone = 140, OLogState = 144, OLogStateTick = 148, OHotBelow = 152, OGradedSpot = 156, OBuildKind = 160, OTestMarker = 164, OSpotMask = 168, OInfo = 172, OGpuLoad = 176, ODimFire = 180, OUpscaler = 184, OEdition = 188, OKscape = 192, ODither = 196, OProjector = 200, OLutOff = 204, OLut = 208, OSource = 212;
+            OLogRequest = 136, OLogDone = 140, OLogState = 144, OLogStateTick = 148, OHotBelow = 152, OGradedSpot = 156, OBuildKind = 160, OTestMarker = 164, OSpotMask = 168, OInfo = 172, OGpuLoad = 176, ODimFire = 180, OUpscaler = 184, OEdition = 188, OKscape = 192, ODither = 196, OProjector = 200, OLutOff = 204, OLut = 208, OSource = 212, OSsr = 216;
 
         readonly MemoryMappedFile map;
         readonly MemoryMappedViewAccessor view;
@@ -531,6 +531,7 @@ namespace ClipGuard
             view.Write(OSpotMask, s.SpotMask);
             view.Write(ODimFire, s.DimFire ? 1 : 0);
             view.Write(OUpscaler, Edition.Plus ? s.Upscaler : 0);
+            view.Write(OSsr, Edition.Plus ? s.Ssr : 0);   // 2.85.0: SSimSuperRes
             view.Write(OEdition, Edition.Plus ? 1 : 0);
             // 1 = Kaleidescape (ClipGuard+); 2.64.1 (Player): 2 = Video Processor, 3 = Media Player.
             view.Write(OKscape, s.PlayerSource == 2 ? 2 : (s.PlayerSource == 1 ? 3 : (s.KscapeActive ? 1 : 0)));
@@ -550,11 +551,7 @@ namespace ClipGuard
             view.Write(OPinned, s.Pinned ? 1 : 0);
             view.Write(OSelected, s.Selected);
             view.Write(OLastKey, s.LastKeyTick);
-#if TEST && !PUBLIC
-            view.Write(OBuildKind, 1);
-#else
             view.Write(OBuildKind, 0);
-#endif
             view.Write(OVersion, (uint)1);
             view.Write(OMagic, Magic);
             Heartbeat();
@@ -603,13 +600,17 @@ namespace ClipGuard
     static class Remote
     {
         public static readonly string[] Actions = { "Up", "Down", "Left", "Right", "OK", "Back", "PlayPause", "Stop",
-            "NextChapter", "PrevChapter", "SkipForward", "SkipBack", "Menu" };
+            "NextChapter", "PrevChapter", "SkipForward", "SkipBack", "Menu", "VideoProcessor", "MediaPlayer", "Banner"
+            };
         public static readonly string[] Names = { "Up", "Down", "Left", "Right", "OK (select)", "Back",
-            "Play / Pause", "Stop", "Next chapter", "Previous chapter", "Skip forward", "Skip back", "Menu (track menu; ClipGuard menu)" };
+            "Play / Pause", "Stop", "Next chapter", "Previous chapter", "Skip forward", "Skip back", "Menu (track menu; ClipGuard menu)",
+            "Video Processor (the capture picture)", "Media Player (back to the library)", "Banner (show or hide the film's bar)" };
         // What each action becomes: the keys the player and its library already know.
+        // 2.74.0: Video Processor = Ctrl+V, Media Player = Ctrl+M (also keyboard shortcuts).
         public static readonly Keys[] Canon = { Keys.Up, Keys.Down, Keys.Left, Keys.Right, Keys.Enter, Keys.BrowserBack,
             Keys.MediaPlayPause, Keys.MediaStop, Keys.MediaNextTrack, Keys.MediaPreviousTrack,
-            Keys.Right | Keys.Shift, Keys.Left | Keys.Shift, Keys.Apps };
+            Keys.Right | Keys.Shift, Keys.Left | Keys.Shift, Keys.Apps, Keys.V | Keys.Control, Keys.M | Keys.Control, Keys.I   // 2.80.0: Banner = I
+            };
         public const string Section = "Remote";
 
         public static string[] Load(string ini)
@@ -687,7 +688,8 @@ namespace ClipGuard
         public bool Info;                 // info banner along the top of the picture (F6); off at each start
         public int SpotMask = 1;          // Hot spot mask: 0 = Patch, 1 = Pixel (only the light, feathered)
         public bool DimFire;              // Dim fire: false = clearly orange or red lights (flames, candles) are left alone
-        public int Upscaler = 0;          // Upscaler: 0 = Normal, 1 = FSRCNNX (neural 2x for 1080p on a 4K screen)
+        public int Upscaler = 0;          // Upscaler: 0 = Normal, 1 = FSRCNNX, 2 = ArtCNN C4F32 (2.85.0) (neural 2x for 1080p on a 4K screen)
+        public int Ssr = 0;               // 2.85.0: SSimSuperRes after scaling (1 = on)
         public int Dither = 0;            // Dither: 0 = Static, 1 = Temporal (the pattern moves every frame) (2.45.0)
         public bool LutOff = false;       // 2.48.2: F5, calibration LUT off for comparing (not saved: always starts on)
         public int Projector = 0;         // Projector: 0 = Universal (Reactive), 1 = Titan Noir Max DBLE High (Predictive) (2.46.0), 3 = DBLE Low (2.60.0); Valerion (2) removed in 2.51.2
@@ -742,7 +744,8 @@ namespace ClipGuard
             s.GradedSpot = Clamp(Read(ini, "GradedSpot", 0.5), 0.0, 1.0);
             s.SpotMask = (int)Clamp(Math.Round(Read(ini, "HotSpotMask", 1)), 0, 1);
             s.DimFire = Read(ini, "DimFire", 0) > 0.5;
-            s.Upscaler = Edition.Plus ? (int)Clamp(Math.Round(Read(ini, "Upscaler", 0)), 0, 1) : 0;
+            s.Upscaler = Edition.Plus ? (int)Clamp(Math.Round(Read(ini, "Upscaler", 0)), 0, 2) : 0;
+            s.Ssr = Edition.Plus ? (int)Clamp(Math.Round(Read(ini, "SSimSuperRes", 0)), 0, 1) : 0;
             s.HotSpotLast = Clamp(Read(ini, "HotSpotLast", s.HotSpot > 0.0 ? s.HotSpot : 0.6), 0.05, 1.0);
             s.Grid = (int)Clamp(Read(ini, "Grid", 1), 0, 1);
             s.LookAhead = NormLookAhead((int)Math.Round(Read(ini, "LookAhead", 4)));
@@ -785,6 +788,7 @@ namespace ClipGuard
             if (Edition.Plus)
             {
                 W(ini, "Upscaler", Upscaler.ToString(CultureInfo.InvariantCulture));
+                W(ini, "SSimSuperRes", Ssr.ToString(CultureInfo.InvariantCulture));
                 W(ini, "KaleidescapeIP", KscapeIP);
                 W(ini, "KaleidescapeLookAhead", KscapeLookAhead.ToString(CultureInfo.InvariantCulture));
                 W(ini, "KaleidescapeLookAhead4", "1");
@@ -1137,7 +1141,7 @@ namespace ClipGuard
                 case HK_F6:
                     // Info banner on/off; the overlay stays as it is.
                     s.Info = !s.Info;
-                    infoDue = s.Info ? DateTime.Now.AddSeconds(kInfoSeconds) : DateTime.MaxValue;
+                    infoDue = DateTime.MaxValue;   // 2.84.0: stays up until F6 / Home again
                     break;
                 case HK_F9:
                     // Fix areas on/off; the overlay stays as it is.
@@ -1383,7 +1387,7 @@ namespace ClipGuard
                     if (Edition.Plus) s.LookAhead = (s.LookAhead >= 12) ? (dir > 0 ? 12 : 6) : Settings.NormLookAhead(s.LookAhead + 2 * dir);   // Off, 2, 4, 6, High Performance
                     else s.LookAhead = Math.Min(6, Settings.NormLookAhead(Math.Min(s.LookAhead, 6) + 2 * dir));   // Off, 2, 4, 6
                     break;
-                case 15: if (Edition.Plus) s.Upscaler = 1 - s.Upscaler; break;
+                case 15: if (Edition.Plus) s.Upscaler = (s.Upscaler + (dir < 0 ? 2 : 1)) % 3; break;   // 2.85.0: Normal, FSRCNNX, ArtCNN
                 case 16: s.Dither = 1 - s.Dither; break;
                 case 17:
                     {
@@ -1475,6 +1479,18 @@ namespace ClipGuard
 #if PLAYER
         // ---- 2.64.1: the player's ClipGuard tab and source (Media Player / Video Processor) ----
         public void SetPlayerSource(int src) { if (s.PlayerSource != src) { s.PlayerSource = src; Changed(); } }
+        // 2.74.0: the Kaleidescape, for the remote in Video Processor.
+        public bool KscapeReady() { return false; }   // 0.9.1: no Kaleidescape control in the public build
+        public int KscapeMode() { return kscape != null ? kscape.Mode : 0; }
+        public void KscapeSend(string command) { if (kscape != null) kscape.Send(command); }
+        // 2.83.0: the remote's Home button: the same as F6 (ClipGuard's info banner on / off).
+        public void ToggleClipGuardBanner()
+        {
+            s.Info = !s.Info;
+            infoDue = DateTime.MaxValue;   // 2.84.0: stays up until F6 / Home again
+            Changed();
+            UpdatePlainArrows();
+        }
 
         // The tab's rows: the F7 rows (Upscaler is on the Picture tab, View and Menu stay in F7),
         // with the two look-aheads.
@@ -1532,8 +1548,10 @@ namespace ClipGuard
         }
 
         // The Picture tab's Upscaler row: FSRCNNX is ClipGuard's.
-        public bool Fsrcnnx() { return s.Upscaler == 1; }
-        public void SetFsrcnnx(bool on) { int v = on ? 1 : 0; if (s.Upscaler != v) { s.Upscaler = v; Changed(); } }
+        public int NeuralUpscaler() { return s.Upscaler; }   // 2.85.0: 0 none, 1 FSRCNNX, 2 ArtCNN C4F32
+        public void SetNeuralUpscaler(int v) { v = Math.Max(0, Math.Min(2, v)); if (s.Upscaler != v) { s.Upscaler = v; Changed(); } }
+        public bool Ssr() { return s.Ssr == 1; }
+        public void SetSsr(bool on) { int v = on ? 1 : 0; if (s.Ssr != v) { s.Ssr = v; Changed(); } }
 #endif
 
         public void MediaClosed()
@@ -1575,6 +1593,61 @@ namespace ClipGuard
     {
         public volatile bool Playing;
         public volatile string FoundIP;
+        public volatile int Mode;           // 2.74.0: the last play mode (0 none, 1 paused, 2 playing, ...)
+
+        // 2.74.0 (Player): the remote controls the Kaleidescape in Video Processor. Commands
+        // go out in order on their own connection ("01/1/<COMMAND>:"), never waiting on the UI.
+        readonly Queue<string> sendQ = new Queue<string>();
+        readonly AutoResetEvent sendWake = new AutoResetEvent(false);
+        Thread sender;
+        TcpClient sendClient;
+        public bool Ready { get { return FoundIP != null || (!auto && !setting.Equals("off", StringComparison.OrdinalIgnoreCase)); } }
+
+        public void Send(string command)
+        {
+            lock (sendQ) { if (sendQ.Count < 20) sendQ.Enqueue(command); }
+            if (sender == null)
+            {
+                sender = new Thread(SendLoop);
+                sender.IsBackground = true;
+                sender.Start();
+            }
+            sendWake.Set();
+        }
+
+        void SendLoop()
+        {
+            while (true)
+            {
+                sendWake.WaitOne(5000);
+                while (true)
+                {
+                    string c;
+                    lock (sendQ) { if (sendQ.Count == 0) break; c = sendQ.Dequeue(); }
+                    string host = FoundIP ?? (auto ? null : setting);
+                    if (host == null) continue;
+                    for (int attempt = 0; attempt < 2; attempt++)
+                    {
+                        try
+                        {
+                            if (sendClient == null) sendClient = Connect(host, 1000);
+                            if (sendClient == null) break;
+                            NetworkStream st = sendClient.GetStream();
+                            byte[] b = Encoding.ASCII.GetBytes("01/1/" + c + ":\r");
+                            st.Write(b, 0, b.Length);
+                            byte[] junk = new byte[1024];
+                            while (st.DataAvailable) st.Read(junk, 0, junk.Length);   // replies are not needed
+                            break;
+                        }
+                        catch (Exception)
+                        {
+                            try { if (sendClient != null) sendClient.Close(); } catch (Exception) { }
+                            sendClient = null;
+                        }
+                    }
+                }
+            }
+        }
         const int Port = 10000;
         readonly string setting;
         readonly bool auto;
@@ -1610,7 +1683,7 @@ namespace ClipGuard
                         nextScan = DateTime.Now.AddMinutes(2);
                         ip = Scan();
                     }
-                    if (ip == null) { Playing = false; return; }
+                    if (ip == null) { Playing = false; KsShared.Write(""); return; }
                     lastIP = ip;
                     FoundIP = ip;
                 }
@@ -1627,6 +1700,7 @@ namespace ClipGuard
                     return;
                 }
                 fails = 0;
+                Mode = mode;
                 Playing = mode != 0;
             }
             catch (Exception)
@@ -1654,28 +1728,160 @@ namespace ClipGuard
 
         static int Ask(NetworkStream st)
         {
-            byte[] cmd = Encoding.ASCII.GetBytes("01/1/GET_PLAY_STATUS:\r");
+            string[] f = Fields(AskLine(st, "GET_PLAY_STATUS", "PLAY_STATUS"));
+            int m;
+            return f != null && f.Length > 0 && int.TryParse(f[0], out m) ? m : -1;
+        }
+
+        // 2.84.0: one request; the text after ":<key>:" on its reply line (checksum removed),
+        // or null when it does not answer in time.
+        static string AskLine(NetworkStream st, string command, string key)
+        {
+            byte[] cmd = Encoding.ASCII.GetBytes("01/1/" + command + ":\r");
             st.Write(cmd, 0, cmd.Length);
             StringBuilder sb = new StringBuilder();
-            byte[] buf = new byte[512];
+            byte[] buf = new byte[1024];
+            string tag = ":" + key + ":";
             DateTime until = DateTime.Now.AddMilliseconds(1200);
             while (DateTime.Now < until)
             {
                 int n;
                 try { n = st.Read(buf, 0, buf.Length); }
-                catch (IOException) { return -1; }
-                if (n <= 0) return -1;
-                sb.Append(Encoding.ASCII.GetString(buf, 0, n));
+                catch (IOException) { return null; }
+                if (n <= 0) return null;
+                sb.Append(Encoding.UTF8.GetString(buf, 0, n));
                 string all = sb.ToString();
-                int i = all.IndexOf(":PLAY_STATUS:", StringComparison.Ordinal);
-                if (i >= 0 && all.Length > i + 13)
+                int i = all.IndexOf(tag, StringComparison.Ordinal);
+                if (i >= 0)
                 {
-                    char c = all[i + 13];
-                    return (c >= '0' && c <= '9') ? c - '0' : -1;
+                    int e = all.IndexOfAny(new[] { '\r', '\n' }, i);
+                    if (e < 0) continue;
+                    string v = all.Substring(i + tag.Length, e - i - tag.Length);
+                    int c = v.LastIndexOf(":/", StringComparison.Ordinal);   // ":/NN" checksum
+                    if (c >= 0) v = v.Substring(0, c);
+                    return v;
                 }
-                if (sb.Length > 8192) sb.Remove(0, sb.Length - 1024);
+                if (sb.Length > 16384) sb.Remove(0, sb.Length - 2048);
             }
-            return -1;
+            return null;
+        }
+
+        // Fields split on ':', with the protocol's backslash escapes undone.
+        static string[] Fields(string v)
+        {
+            if (v == null) return null;
+            List<string> l = new List<string>();
+            StringBuilder cur = new StringBuilder();
+            for (int i = 0; i < v.Length; i++)
+            {
+                char ch = v[i];
+                if (ch == '\\' && i + 1 < v.Length) { cur.Append(v[++i]); continue; }
+                if (ch == ':') { l.Add(cur.ToString()); cur.Length = 0; continue; }
+                cur.Append(ch);
+            }
+            l.Add(cur.ToString());
+            return l.ToArray();
+        }
+
+        // ---- 2.84.0: details for the top banner on Video Processor --------------------
+        string kTitle = "", kLoc = "", kColor = "", kMask = "", kTitleNum = "";
+        DateTime kNext = DateTime.MinValue;
+        string kLastRaw = "";
+
+        void Details(int mode)
+        {
+            if (stream == null) return;
+            if (mode == 0) { kTitle = ""; KsShared.Write(""); return; }
+            string ps = AskLine(stream, "GET_PLAY_STATUS", "PLAY_STATUS");
+            string[] f = Fields(ps) ?? new string[0];
+            string num = f.Length > 2 ? f[2] : "";
+            if (DateTime.Now >= kNext || num != kTitleNum)
+            {
+                kNext = DateTime.Now.AddSeconds(5);
+                kTitleNum = num;
+                string t = AskLine(stream, "GET_PLAYING_TITLE_NAME", "TITLE_NAME");
+                string loc = AskLine(stream, "GET_MOVIE_LOCATION", "MOVIE_LOCATION");
+                string col = AskLine(stream, "GET_VIDEO_COLOR", "VIDEO_COLOR");
+                string mask = AskLine(stream, "GET_SCREEN_MASK", "SCREEN_MASK");
+                string[] tf = Fields(t);
+                kTitle = tf != null && tf.Length > 0 ? Ascii(string.Join(":", tf).Trim().TrimEnd(':')) : "";
+                kLoc = LocText(Fields(loc));
+                kColor = ColorText(Fields(col));
+                kMask = MaskText(Fields(mask));
+                string raw = "PLAY_STATUS:" + ps + " | TITLE_NAME:" + t + " | MOVIE_LOCATION:" + loc + " | VIDEO_COLOR:" + col + " | SCREEN_MASK:" + mask;
+                if (raw != kLastRaw) { kLastRaw = raw; KsLog(raw); }
+            }
+            List<string> lines = new List<string>();
+            lines.Add(kTitle);
+            int len = F(f, 3), at = F(f, 4), ch = F(f, 5);
+            if (len > 0) lines.Add(Hms(at) + " of " + Hms(len));
+            string state = mode == 1 ? "Paused" : mode == 2 ? "Playing" : mode == 3 ? "Forward" : mode == 4 ? "Reverse" : "";
+            lines.Add((ch > 0 ? "Chapter " + ch.ToString(CultureInfo.InvariantCulture) + (state.Length > 0 ? " \u00B7 " : "") : "") + state);
+            if (kColor.Length > 0) lines.Add("Sends " + kColor);
+            if (kMask.Length > 0) lines.Add(kMask);
+            if (kLoc.Length > 0) lines.Add(kLoc);
+            KsShared.Write(string.Join("\n", lines.ToArray()));
+        }
+
+        static int F(string[] f, int i) { int v; return f != null && f.Length > i && int.TryParse(f[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out v) ? v : 0; }
+
+        static string Hms(int s)
+        {
+            if (s < 0) s = 0;
+            return (s / 3600).ToString(CultureInfo.InvariantCulture) + ":" + (s / 60 % 60).ToString("00", CultureInfo.InvariantCulture) + ":" + (s % 60).ToString("00", CultureInfo.InvariantCulture);
+        }
+
+        static string LocText(string[] f)
+        {
+            int v = F(f, 0);
+            return v == 3 ? "Main feature" : v == 4 ? "Intermission" : v == 5 ? "End credits" : v == 6 ? "Disc menu" : "";
+        }
+
+        static string ColorText(string[] f)
+        {
+            if (f == null || f.Length < 2) return "";
+            int eotf = F(f, 0), cs = F(f, 1), depth = F(f, 2), smp = F(f, 3);
+            List<string> p = new List<string>();
+            string e = eotf == 1 ? "SDR" : eotf == 2 ? "HDR" : eotf == 3 ? "HDR10" : "";
+            if (e.Length > 0) p.Add(e);
+            string c = cs == 2 ? "BT.601" : cs == 3 ? "BT.709" : cs == 4 ? "BT.2020" : "";
+            if (c.Length > 0) p.Add(c);
+            int bits = depth == 24 || depth == 30 || depth == 36 ? depth / 3 : (depth == 8 || depth == 10 || depth == 12 ? depth : 0);
+            string sm = smp == 1 ? "RGB" : smp == 2 ? "4:2:2" : smp == 3 ? "4:4:4" : smp == 4 ? "4:2:0" : "";
+            if (bits > 0 || sm.Length > 0) p.Add(((bits > 0 ? bits.ToString(CultureInfo.InvariantCulture) + "-bit " : "") + sm).Trim());
+            return string.Join(", ", p.ToArray());
+        }
+
+        static string MaskText(string[] f)
+        {
+            int v = F(f, 0);
+            string r = v == 1 ? "1.33" : v == 2 ? "1.66" : v == 3 ? "1.78" : v == 4 ? "1.85" : v == 5 ? "2.35" : "";
+            return r.Length > 0 ? "Image " + r + ":1" : "";
+        }
+
+        // The banner's font has ASCII and Latin-1 punctuation only: accents are dropped.
+        static string Ascii(string s)
+        {
+            string d = s.Normalize(NormalizationForm.FormD);
+            StringBuilder b = new StringBuilder();
+            foreach (char c in d)
+            {
+                if (CharUnicodeInfo.GetUnicodeCategory(c) == UnicodeCategory.NonSpacingMark) continue;
+                b.Append(c >= 32 && c < 127 ? c : (c == '\u2019' || c == '\u2018' ? '\'' : (c == '\u2013' || c == '\u2014' ? '-' : '?')));
+            }
+            return b.ToString();
+        }
+
+        static void KsLog(string line)
+        {
+            try
+            {
+                string p = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipGuard", "kscape.log");
+                FileInfo fi = new FileInfo(p);
+                if (fi.Exists && fi.Length > 200000) File.Delete(p);
+                File.AppendAllText(p, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "  " + line + "\r\n");
+            }
+            catch (Exception) { }
         }
 
         static TcpClient Connect(string host, int ms)
@@ -1763,14 +1969,70 @@ namespace ClipGuard
             if (timer != null) timer.Dispose();
             timer = null;
             CloseLink();
+            KsShared.Write("");
         }
     }
+
+    // 2.84.0: the Kaleidescape's details for the renderer's top banner (Local\ClipGuard_Kscape).
+    static class KsShared
+    {
+        static readonly InfoShared block = new InfoShared(@"Local\ClipGuard_Kscape");
+        public static void Write(string text) { block.Write(text); }
+    }
 #endif
+
+    // 2.84.0 / 2.86.0: a text block for the renderer's top banner: magic "KSC1", tick, chars,
+    // UTF-16 text (lines: title, then the column). The renderer ignores it after 5 s without a tick.
+    sealed class InfoShared
+    {
+        readonly string name;
+        MemoryMappedFile map;
+        MemoryMappedViewAccessor view;
+        readonly object gate = new object();
+
+        public InfoShared(string name) { this.name = name; }
+
+        public void Write(string text)
+        {
+            lock (gate)
+            {
+                try
+                {
+                    if (view == null)
+                    {
+                        map = MemoryMappedFile.CreateOrOpen(name, 4096);
+                        view = map.CreateViewAccessor(0, 4096);
+                    }
+                    if (text == null) text = "";
+                    if (text.Length > 2000) text = text.Substring(0, 2000);
+                    char[] c = text.ToCharArray();
+                    view.Write(8, (uint)c.Length);
+                    view.WriteArray(12, c, 0, c.Length);
+                    view.Write(4, (uint)Environment.TickCount);
+                    view.Write(0, 0x3143534Bu);
+                }
+                catch (Exception) { }
+            }
+        }
+
+        // The banner's font has ASCII and Latin-1 punctuation only: accents are dropped.
+        public static string Ascii(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            string d = s.Normalize(NormalizationForm.FormD);
+            StringBuilder b = new StringBuilder();
+            foreach (char c in d)
+            {
+                if (CharUnicodeInfo.GetUnicodeCategory(c) == UnicodeCategory.NonSpacingMark) continue;
+                b.Append(c >= 32 && c < 127 ? c : (c == '\u00B7' ? c : (c == '\u2019' || c == '\u2018' ? '\'' : (c == '\u2013' || c == '\u2014' ? '-' : '?'))));
+            }
+            return b.ToString();
+        }
+    }
 
     // ---- GitHub: updates and logs -----------------------------------------------
     // The token comes only from clipguard.ini next to ClipGuard.exe ([GitHub] Token=).
 
-#if PUBLIC
     // ClipGuard Media Player public build: no GitHub or token code at all. Logs and meter
     // readings are kept on this PC only; updates come as a new Setup from the Releases page.
     static class GitHub
@@ -1788,5 +2050,4 @@ namespace ClipGuard
         public static void DeleteOld() { }
         public static bool Run(string appDir, string seedIni) { return false; }
     }
-#endif
 }
