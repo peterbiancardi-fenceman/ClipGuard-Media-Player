@@ -19,7 +19,11 @@ try {
     $tmp = Join-Path $env:TEMP ('argyll_' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     $zip = Join-Path $tmp $name
-    Invoke-WebRequest -UseBasicParsing -Headers $ua -Uri ("https://www.argyllcms.com/" + $name) -OutFile $zip
+    # argyllcms.com is sometimes slow to answer: try up to 5 times (0.9.2)
+    for ($try = 1; $try -le 5; $try++) {
+        try { Invoke-WebRequest -UseBasicParsing -Headers $ua -TimeoutSec 120 -Uri ("https://www.argyllcms.com/" + $name) -OutFile $zip; break }
+        catch { Write-Host "[WARN] ArgyllCMS try $try failed: $($_.Exception.Message)"; if ($try -eq 5) { throw }; Start-Sleep -Seconds 45 }
+    }
     $sz = "$env:ProgramFiles\7-Zip\7z.exe"
     if (-not (Test-Path $sz)) { $sz = '7z' }
     & $sz x -y "-o$tmp\x" $zip | Out-Null
