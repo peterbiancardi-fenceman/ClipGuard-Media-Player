@@ -185,6 +185,22 @@ namespace ClipGuard
                     }
             File.WriteAllText(dst, sb.ToString());
         }
+        // 2.97.0: the white set by the LUT: every output scaled per channel (k <= 1), so the
+        // projector's own white lands on the target white; the rest of the LUT is unchanged.
+        public static void ScaleOut(string src, string dst, double[] k)
+        {
+            Cube c = Load(src);
+            int N = c.N;
+            StringBuilder sb = new StringBuilder(string.Format(CultureInfo.InvariantCulture,
+                "# ClipGuard: ArgyllCMS LUT, white set by the LUT (R x{0:0.0000}, G x{1:0.0000}, B x{2:0.0000})\nLUT_3D_SIZE {3}\n", k[0], k[1], k[2], N));
+            for (int b = 0; b < N; b++)
+                for (int g = 0; g < N; g++)
+                    for (int r = 0; r < N; r++)
+                        sb.AppendFormat(CultureInfo.InvariantCulture, "{0:0.000000} {1:0.000000} {2:0.000000}\n",
+                            Math.Max(0, Math.Min(1, c.At(r, g, b, 0) * k[0])), Math.Max(0, Math.Min(1, c.At(r, g, b, 1) * k[1])), Math.Max(0, Math.Min(1, c.At(r, g, b, 2) * k[2])));
+            File.WriteAllText(dst, sb.ToString());
+        }
+
         public double[] Apply(double r, double g, double b)
         {
             double[] p = { r * (N - 1), g * (N - 1), b * (N - 1) };
@@ -330,6 +346,8 @@ namespace ClipGuard
         static readonly string[] CalSpaceNames = { "BT.709", "BT.2020" };
         volatile bool calSetup;
         int calRow, calProj, calGamma, calSpace = 1, calRefresh;   // calRefresh: 0 = normal, 1 = refresh mode (spotread -Y r)
+        int calWhite;   // 2.96.0: 0 = perceptual white point (set with the live balance meter), 1 = as set by eye; 2.97.0: 2 = perceptual, set by the LUT
+        const double PerceptualX = 0.3034, PerceptualY = 0.3061;   // CIE 1931 2 degree
         static readonly string[] CalModeNames = { "Normal", "Refresh (synced to the projector)" };
         volatile bool calWaiting;          // the run waits for Enter (or Esc)
         readonly AutoResetEvent calGo = new AutoResetEvent(false);
@@ -343,6 +361,9 @@ namespace ClipGuard
                 "Projector:     " + CalName() + (CalApp.On ? "   (correction: " + (CalApp.Ccss.Length > 0 ? Path.GetFileName(CalApp.Ccss) : "none") + ")" : ""),
                 "Gamma:         " + CalGammaNames[calGamma],
                 "Colour space:  " + CalSpaceNames[calSpace],
+                "White point:   " + (calWhite == 0 ? string.Format(CultureInfo.InvariantCulture, "Perceptual (x {0:0.0000}, y {1:0.0000}), set with the live meter", PerceptualX, PerceptualY)
+                    : calWhite == 2 ? string.Format(CultureInfo.InvariantCulture, "Perceptual (x {0:0.0000}, y {1:0.0000}), set by the LUT (leave the projector's white as it is)", PerceptualX, PerceptualY)
+                    : "As set (by eye)"),
                 "Meter mode:    " + CalModeNames[calRefresh] };
             for (int i = 0; i < rows.Length; i++) b.Append(i == calRow ? ">  " : "    ").Append(rows[i]).Append('\n');
             b.Append("\nUp / Down = choose a row   Left / Right = change   Enter = start   Esc = back\n");
@@ -367,14 +388,15 @@ namespace ClipGuard
             }
             if (calSetup)
             {
-                if (k == Keys.Up) calRow = (calRow + 3) % 4;
-                else if (k == Keys.Down) calRow = (calRow + 1) % 4;
+                if (k == Keys.Up) calRow = (calRow + 4) % 5;
+                else if (k == Keys.Down) calRow = (calRow + 1) % 5;
                 else if (k == Keys.Left || k == Keys.Right)
                 {
                     int d = k == Keys.Right ? 1 : -1;
                     if (calRow == 0) { if (!CalApp.On) calProj = (calProj + 2 + d) % 2; }
                     else if (calRow == 1) calGamma = (calGamma + 3 + d) % 3;
                     else if (calRow == 2) calSpace = (calSpace + 2 + d) % 2;
+                    else if (calRow == 3) calWhite = (calWhite + 3 + d) % 3;   // 2.96.0; 2.97.0: three choices
                     else calRefresh = 1 - calRefresh;
                 }
                 else if (k == Keys.N)
@@ -524,6 +546,114 @@ namespace ClipGuard
                     "The top end is still squeezed: 250 reads {0:0.0}% of white (about {1:0.0}% expected){2}. Lower contrast a step (or the gain of a tinted colour), then Enter = measure again,  S = carry on anyway.",
                     q250 * 100, e250 * 100, double.IsNaN(q254) ? "" : string.Format(CultureInfo.InvariantCulture, ", 254 reads {0:0.0}% (about {1:0.0}%)", q254 * 100, e254 * 100));
             }
+        }
+
+        // ---- 2.96.0: the perceptual white point: the white window (where the meter reads) with a
+        // small live meter beside it: R, G and B against the target white, x / y, and the
+        // brightness, read continuously while the projector's gains are adjusted. Enter goes on.
+        void CalWhitePoint(Spotread sp)
+        {
+            Size sz = (Size)Invoke(new Func<Size>(() => ClientSize));
+            calEsc = false;
+            calGo.Reset();
+            calWaiting = true;
+            Bitmap prev = null, prev2 = null;
+            try
+            {
+                MReading m = null;
+                while (true)
+                {
+                    Bitmap bm = CalWhiteCanvas(sz.Width, sz.Height, m);
+                    Show(new MScene { Id = "white_point", Canvas = bm, Patch = -1 });
+                    if (prev2 != null) prev2.Dispose();   // two back: never the one being painted
+                    prev2 = prev; prev = bm;
+                    if (calGo.WaitOne(0)) break;
+                    m = sp.Read(30000);
+                    if (m.Ok) Row("WP", Full("white_point", 255, 255, 255, null), 0, -1, m);
+                    if (cancel) break;
+                }
+            }
+            finally { calWaiting = false; }
+            if (calEsc || cancel) throw new OperationCanceledException();
+        }
+
+        static Bitmap CalWhiteCanvas(int W, int H, MReading m)
+        {
+            Bitmap bm = new Bitmap(W, H);
+            using (Graphics g = Graphics.FromImage(bm))
+            using (Font ft = new Font("Segoe UI", Math.Max(12, H / 60f), FontStyle.Bold))
+            using (Font fv = new Font("Segoe UI", Math.Max(11, H / 70f), FontStyle.Bold))
+            using (Font fs = new Font("Segoe UI", Math.Max(10, H / 80f)))
+            {
+                g.Clear(Color.Black);
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                float side = (float)Math.Sqrt(CalWindow * W * H);
+                float wx = (W - side) / 2f, wy = (H - side) / 2f;
+                g.FillRectangle(Brushes.White, wx, wy, side, side);   // the same window the meter reads on every patch
+                // the panel, beside the window
+                float px = wx + side + W * 0.03f, pw = Math.Min(W * 0.24f, W - px - W * 0.02f), ph = side, py = wy;
+                using (SolidBrush pb = new SolidBrush(Color.FromArgb(26, 26, 30))) g.FillRectangle(pb, px, py, pw, ph);
+                using (Pen pp = new Pen(Color.FromArgb(120, 120, 120), Math.Max(1, H / 1080f))) g.DrawRectangle(pp, px, py, pw, ph);
+                float x = px + pw * 0.06f, y = py + ph * 0.05f, lh = H / 34f;
+                g.DrawString("WHITE POINT", ft, Brushes.White, x, y);
+                y += lh * 1.1f;
+                using (SolidBrush gb = new SolidBrush(Color.FromArgb(170, 170, 170)))
+                    g.DrawString(string.Format(CultureInfo.InvariantCulture, "target  x {0:0.0000}   y {1:0.0000}", PerceptualX, PerceptualY), fs, gb, x, y);
+                y += lh * 1.2f;
+                double[] bal = null; double[] xy = null;
+                if (m != null && m.Ok && m.Y > 0)
+                {
+                    double[] tw = { PerceptualX / PerceptualY, 1, (1 - PerceptualX - PerceptualY) / PerceptualY };
+                    double[] rgb = Cal.Mul(Cal.Inv(Cal.RgbToXyz(Cal.P709, tw)), new double[] { m.X / m.Y, 1, m.Z / m.Y });
+                    double avg = (rgb[0] + rgb[1] + rgb[2]) / 3;
+                    bal = new double[3];
+                    for (int k = 0; k < 3; k++) bal[k] = (rgb[k] / avg - 1) * 100;
+                    xy = Cal.Xy(new double[] { m.X, m.Y, m.Z });
+                }
+                // R, G, B: a bar either side of the middle line, +-10% across, the value written beside it
+                string[] nm = { "R", "G", "B" };
+                Color[] col = { Color.FromArgb(235, 45, 45), Color.FromArgb(40, 190, 80), Color.FromArgb(55, 115, 255) };
+                float bx = x + pw * 0.10f, bw = pw * 0.56f, bh = lh * 0.7f, mid = bx + bw / 2f;
+                for (int k = 0; k < 3; k++)
+                {
+                    g.DrawString(nm[k], fv, Brushes.White, x, y - bh * 0.15f);
+                    using (SolidBrush tb = new SolidBrush(Color.FromArgb(50, 50, 56))) g.FillRectangle(tb, bx, y, bw, bh);
+                    if (bal != null)
+                    {
+                        float v = (float)Math.Max(-10, Math.Min(10, bal[k])) / 10f * (bw / 2f);
+                        RectangleF r = v >= 0 ? new RectangleF(mid, y, v, bh) : new RectangleF(mid + v, y, -v, bh);
+                        if (r.Width > 0.5f)
+                        {
+                            using (SolidBrush cb = new SolidBrush(col[k])) g.FillRectangle(cb, r);
+                            using (Pen wp = new Pen(Color.White, Math.Max(1, H / 1080f))) g.DrawRectangle(wp, r.X, r.Y, r.Width, r.Height);
+                        }
+                        g.DrawString(bal[k].ToString("+0.0;-0.0;0.0", CultureInfo.InvariantCulture) + "%", fv, Brushes.White, bx + bw + pw * 0.03f, y - bh * 0.15f);
+                    }
+                    using (Pen lp = new Pen(Color.White, Math.Max(2, H / 540f))) g.DrawLine(lp, mid, y - bh * 0.2f, mid, y + bh * 1.2f);
+                    y += lh * 1.15f;
+                }
+                y += lh * 0.3f;
+                if (bal != null)
+                {
+                    g.DrawString(string.Format(CultureInfo.InvariantCulture, "x {0:0.0000}   y {1:0.0000}", xy[0], xy[1]), fv, Brushes.White, x, y);
+                    y += lh;
+                    g.DrawString(string.Format(CultureInfo.InvariantCulture, "Brightness  {0:0.0} nits", m.Y), fv, Brushes.White, x, y);
+                    y += lh * 1.2f;
+                    bool on = Math.Abs(bal[0]) <= 1 && Math.Abs(bal[1]) <= 1 && Math.Abs(bal[2]) <= 1;
+                    using (SolidBrush sb = new SolidBrush(on ? Color.FromArgb(255, 212, 0) : Color.FromArgb(200, 200, 200)))
+                        g.DrawString(on ? "ON TARGET (all within 1%)" : "Adjust until all three are within 1%", fv, sb, x, y);
+                }
+                else
+                    using (SolidBrush sb = new SolidBrush(Color.FromArgb(200, 200, 200)))
+                        g.DrawString(m == null ? "Reading..." : "No reading: " + m.Error, fv, sb, x, y);
+                // the instructions, under the window
+                string ins = "Set the projector's white with its R, G, B gains (and offsets for the low end) until the bars sit on the middle line.\n"
+                    + "A bar to the right is too much of that colour, to the left too little.     Enter = done     Esc = stop";
+                using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center })
+                using (SolidBrush ib = new SolidBrush(Color.FromArgb(200, 200, 200)))
+                    g.DrawString(ins, fs, ib, new RectangleF(W * 0.08f, wy + side + H * 0.05f, W * 0.84f, H * 0.15f), sf);
+            }
+            return bm;
         }
 
         // The pattern screens: patches on a black or white surround in a band across the
@@ -744,7 +874,9 @@ namespace ClipGuard
                 // 1. dimming off, then white by eye
                 if (!CalWait(Full("dimming", 40, 40, 40, "Turn the projector's laser dimming (DBLE / EBL) OFF, then press Enter.   Esc = stop"))) throw new OperationCanceledException();
                 CalLevelChecks();   // 2.88.6: black and white level checks, with instructions
-                if (!CalWait(Full("white_eye", 255, 255, 255, "Adjust the projector's white balance until this white window looks right to you, then press Enter.   Esc = stop"))) throw new OperationCanceledException();
+                if (calWhite == 0) CalWhitePoint(sp);   // 2.96.0: the perceptual white, with the live balance meter
+                else if (calWhite == 2) { }             // 2.97.0: the LUT sets the white; the projector's stays as it is
+                else if (!CalWait(Full("white_eye", 255, 255, 255, "Adjust the projector's white balance until this white window looks right to you, then press Enter.   Esc = stop"))) throw new OperationCanceledException();
                 Status("Reading your white...");
                 MReading w = CalRead("white", 255, 255, 255, 1.0, 3);
                 if (!w.Ok) throw new CalStop("Stopped: the meter gave no reading on white (" + w.Error + ").");
@@ -807,7 +939,57 @@ namespace ClipGuard
                 string cubeFinal = Path.Combine(work, "final.cube");
                 Cube.BlendDark(cubeWork, cubeFinal, 0.02, 0.25, 0.80, 1.0);   // 2.88.7: and the gamut edge kept native
                 cubeWork = cubeFinal;
+                double whiteCost = 0;
+                if (calWhite == 2)
+                {
+                    // 2.97.0: the white set by the LUT. From the measured red, green and blue (full and
+                    // their steps), each channel's gain in light that puts the projector's white on the
+                    // target, the largest at 1 (a LUT can only take light away), then as code values.
+                    Func<int, int, int, double[]> at = (r, g, b) => { for (int i = 0; i < pts.Count; i++) if (pts[i][0] == r && pts[i][1] == g && pts[i][2] == b) return xyz[i]; return null; };
+                    double[] K = at(0, 0, 0) ?? new double[3];
+                    double[][] P = { at(255, 0, 0), at(0, 255, 0), at(0, 0, 255) };
+                    if (P[0] == null || P[1] == null || P[2] == null) throw new CalStop("Stopped: the red, green or blue reading is missing, so the LUT can't set the white. Run it again.");
+                    double[,] D = new double[3, 3];
+                    for (int c = 0; c < 3; c++) for (int k = 0; k < 3; k++) D[k, c] = P[c][k] - K[k];
+                    double[] tw = { PerceptualX / PerceptualY, 1, (1 - PerceptualX - PerceptualY) / PerceptualY };
+                    double[] gain = Cal.Mul(Cal.Inv(D), tw);
+                    double gmax = Math.Max(gain[0], Math.Max(gain[1], gain[2]));
+                    if (!(gmax > 0) || gain[0] <= 0 || gain[1] <= 0 || gain[2] <= 0) throw new CalStop("Stopped: the target white is outside what this projector's red, green and blue can make.");
+                    double[] kc = new double[3];
+                    for (int c = 0; c < 3; c++)
+                    {
+                        // the channel's own response (its steps against full), as a gamma
+                        double sum = 0; int n = 0;
+                        foreach (int v in new[] { 85, 128, 170, 212 })   // the cube steps (round(i x 42.5))
+                        {
+                            int[] rgb = { c == 0 ? v : 0, c == 1 ? v : 0, c == 2 ? v : 0 };
+                            double[] m = at(rgb[0], rgb[1], rgb[2]);
+                            if (m == null) continue;
+                            double lin = (m[1] - K[1]) / (P[c][1] - K[1]);
+                            if (lin > 0.001 && lin < 1) { sum += Math.Log(lin) / Math.Log(v / 255.0); n++; }
+                        }
+                        double gam = n > 0 ? Math.Max(1.6, Math.Min(3.0, sum / n)) : 2.2;
+                        kc[c] = Math.Pow(gain[c] / gmax, 1 / gam);
+                    }
+                    string cubeW = Path.Combine(work, "white.cube");
+                    Cube.ScaleOut(cubeWork, cubeW, kc);
+                    cubeWork = cubeW;
+                    csv.AppendFormat(CultureInfo.InvariantCulture, "# white set by the LUT: gains R {0:0.0000} G {1:0.0000} B {2:0.0000} (code x {3:0.0000} {4:0.0000} {5:0.0000})\n",
+                        gain[0] / gmax, gain[1] / gmax, gain[2] / gmax, kc[0], kc[1], kc[2]);
+                }
                 Cube cube = Cube.Load(cubeWork);
+                if (calWhite == 2)
+                {
+                    // the white through the LUT, measured: the white the check, the report and the levels use
+                    double[] ow = cube.Apply(1, 1, 1);
+                    MReading wl = CalRead("white_lut", (int)Math.Round(ow[0] * 255), (int)Math.Round(ow[1] * 255), (int)Math.Round(ow[2] * 255), 1.0, 3);
+                    if (wl.Ok && wl.Y > 0)
+                    {
+                        whiteCost = 1 - wl.Y / W[1];
+                        W[0] = wl.X; W[1] = wl.Y; W[2] = wl.Z;
+                        yBlack = bk.Ok ? Math.Max(0, bk.Y / wl.Y) : yBlack;
+                    }
+                }
 
                 // 4. check: before (raw) and after (through the LUT, as the renderer applies it)
                 List<CalPatch> chk = CalCheckPatches();
@@ -856,6 +1038,7 @@ namespace ClipGuard
                 if (CalApp.On) report.Add("LUT saved: " + file + ".cube (" + desc + "). Choose it in the player: Picture > Calibration LUT > LUT.");
                 else report.Add("LUT saved: " + file + ".cube (" + desc + "). ClipGuard loads it within a few seconds when the menu's LUT row is set to " + (file == "titan" ? "Titan" : "Valerion") + ".");
                 report.Add(string.Format(CultureInfo.InvariantCulture, "Average error: {0:0.0} before, {1:0.0} after. Worst: {2:0.0} before, {3:0.0} after.", avgB, avgA, maxB, maxA));
+                if (calWhite == 2) report.Add(string.Format(CultureInfo.InvariantCulture, "White set by the LUT to x {0:0.0000} y {1:0.0000}: {2:0.0} nits ({3:0}% of the projector's own white).", PerceptualX, PerceptualY, W[1], (1 - whiteCost) * 100));
                 report.Add("Report: " + pdfPath);
                 report.Add("Turn the laser dimming back on for watching.");
                 done = true;
@@ -892,6 +1075,8 @@ namespace ClipGuard
                 }
                 catch (Exception ex) { summary += "\n\nNot sent (" + ex.Message + ")."; }
             }
+            // 2.97.1: from the player, a stopped or failed run goes straight back to the setup
+            if (CalApp.On && !done) { calSetup = true; calRow = 0; SetIdle(summary + "\n\n" + CalSetupText()); return; }
             SetIdle("Auto-cal finished.\n\n" + summary + "\n\nL = auto-cal again   Esc = quit");
         }
 
@@ -915,7 +1100,9 @@ namespace ClipGuard
             p.Text(L, 58, 24, "ClipGuard Calibration", true, ink);
             string date = DateTime.Now.ToString("d MMMM yyyy", CultureInfo.InvariantCulture);
             p.Text(R - 6.2 * date.Length, 58, 11, date, false, soft);
-            p.Text(L, 80, 11, CalName() + "   |   " + CalSpaceNames[calSpace] + "   |   Gamma " + CalGammaNames[calGamma] + "   |   White: yours, set by eye", false, ink);
+            p.Text(L, 80, 11, CalName() + "   |   " + CalSpaceNames[calSpace] + "   |   Gamma " + CalGammaNames[calGamma] + (calWhite == 0 ? string.Format(CultureInfo.InvariantCulture, "   |   White: perceptual, x {0:0.0000} y {1:0.0000}", PerceptualX, PerceptualY)
+                : calWhite == 2 ? string.Format(CultureInfo.InvariantCulture, "   |   White: perceptual, x {0:0.0000} y {1:0.0000}, set by the LUT", PerceptualX, PerceptualY)
+                : "   |   White: yours, set by eye"), false, ink);
             p.Text(L, 95, 9, meterInfo + "   |   " + ccss + "   |   " + CalModeNames[calRefresh].Split(' ')[0] + " mode", false, soft);
             p.Line(L, 106, R, 106, Color.FromArgb(215, 215, 222), 1, false);
 

@@ -499,6 +499,9 @@ namespace ClipGuard
                 if (!idle) { cancel = true; status = "Stopping..."; Invalidate(); }
                 else Close();
             }
+            // 2.97.1: opened from the player, only calibration works (L, N, C, Esc): the DBLE
+            // and meter tests on the other keys stay off
+            else if (CalApp.On) { }
             else if (idle && e.KeyCode == Keys.A)
             {
                 idle = false;

@@ -1261,6 +1261,9 @@ namespace ClipGuard
             }
             Changed();
             UpdatePlainArrows();
+#if PLAYER
+            if (media != null) media.PausedRedraw((int)OverlayHideMs + 1500);   // 2.102.0: a paused film shows the change
+#endif
         }
 
         // Close Unplugged and start ClipGuard again: the new start (Test build)
@@ -1565,6 +1568,9 @@ namespace ClipGuard
             infoDue = DateTime.MaxValue;   // 2.84.0: stays up until F6 / Home again
             Changed();
             UpdatePlainArrows();
+#if PLAYER
+            if (media != null) media.PausedRedraw(1500);   // 2.102.0
+#endif
         }
 
         // The tab's rows: the F7 rows (Upscaler is on the Picture tab, View and Menu stay in F7),

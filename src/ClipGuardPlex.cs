@@ -703,6 +703,9 @@ namespace ClipGuard
             playTimer.Interval = 1000;
             playTimer.Tick += delegate { PlayTick(); FileInfoTick(); };
 #if PLAYER
+            playTimer.Tick += delegate { if (paused && playing != null && DateTime.Now < pausedRedrawUntil) UnpluggedSettings.Redraw(); };   // 0.9.4
+#endif
+#if PLAYER
             if (PHost != null) { IPlayerHost ph = PHost; UnpluggedSettings.GetFsr = ph.NeuralUpscaler; UnpluggedSettings.SetFsr = ph.SetNeuralUpscaler; }
             // 2.66.0: the LUT moved from ClipGuard's LUT row to Picture > Calibration LUT; the
             // Titan / Valerion LUT that was chosen there is chosen here, once.
@@ -2636,11 +2639,7 @@ namespace ClipGuard
             Movie m = startM;
             if (m == null) return;
             Image art = Img(m, m.Art, 1920, 1080);
-            if (art != null)
-            {
-                g.DrawImage(art, new RectangleF(0, 0, 1920, 1080));
-                using (SolidBrush b = new SolidBrush(Color.FromArgb(215, Bg))) g.FillRectangle(b, 0, 0, 1920, 1080);
-            }
+            if (art != null) DrawFit(g, art, new RectangleF(0, 0, 1920, 1080), 215, Bg);   // 0.9.4
             Poster(g, m, 0, 200, 270, 360, 540, false);
             const float x = 640, w = 1080;
             bool ep = m.Type == "episode";
@@ -4358,11 +4357,7 @@ namespace ClipGuard
             Movie s = showCur;
             if (s == null) return;
             Image art = Img(s, s.Art, 1920, 1080);
-            if (art != null)
-            {
-                g.DrawImage(art, new RectangleF(0, 0, 1920, 1080));
-                using (SolidBrush b = new SolidBrush(Color.FromArgb(215, Bg))) g.FillRectangle(b, 0, 0, 1920, 1080);
-            }
+            if (art != null) DrawFit(g, art, new RectangleF(0, 0, 1920, 1080), 215, Bg);   // 0.9.4
             Poster(g, s, 0, 96, 120, 300, 450, false);
             float x = 460;
             TextBox(g, s.Title, 48, true, Color.White, new RectangleF(x, 110, 1360, 70));
@@ -4736,8 +4731,22 @@ namespace ClipGuard
 
         void Kick() { if (ovl != null) ovl.Kick(); }
 
+        // 0.9.4: while paused the renderer draws only when asked, so ClipGuard's banner and
+        // F7 menu are redrawn after their keys, then every second until the menu has had
+        // time to close by itself.
+#if PLAYER
+        DateTime pausedRedrawUntil = DateTime.MinValue;
+        public void PausedRedraw(int ms)
+        {
+            if (playing == null || !paused) return;
+            UnpluggedSettings.Redraw();
+            DateTime t = DateTime.Now.AddMilliseconds(ms);
+            if (t > pausedRedrawUntil) pausedRedrawUntil = t;
+        }
+#endif
+
         bool PreviewOn() { return seekTarget >= 0 && DateTime.Now < seekHold; }
-        bool BarOn() { return !lipSync && playing != null && (DateTime.Now < barUntil || paused || PreviewOn()); }
+        bool BarOn() { return !lipSync && playing != null && (DateTime.Now < barUntil || PreviewOn()); }   // 0.9.4: not held up while paused
         bool OverlayWanted() { return player != null && ((depthOpen && DateTime.Now < depthUntil) || DateTime.Now < msgUntil || VolumeOn() || xmcMenu || BarOn() || menuOpen || (capturing && DateTime.Now < capUntil)); }
 
         long PosMs() { return PreviewOn() ? seekTarget / 10000 : Math.Max(0, lastPos); }
@@ -4754,6 +4763,7 @@ namespace ClipGuard
             if (menuOpen) return MenuKey(k);
             if (depthOpen && DateTime.Now > depthUntil) depthOpen = false;   // 2.94.0: closed itself after a while
             if (depthOpen && !ctrl) return DepthKey(k);
+            if (paused) ShowBar(3000);   // 0.9.4: any key while paused brings the bar back for 3 s
             if (lipSync)
             {
                 if (k == Keys.Left || k == Keys.Right)
@@ -4861,12 +4871,12 @@ namespace ClipGuard
         {
             Engine.Cmd(play ? "{\"a\":\"play\"}" : "{\"a\":\"pause\"}");
             paused = !play;
-            ShowBar(play ? 3000 : 0);
+            ShowBar(3000);   // 0.9.4: paused, the bar goes after 3 s too
         }
 
         void ToggleBar()
         {
-            if (BarOn() && !paused) { barUntil = DateTime.MinValue; Kick(); }
+            if (BarOn()) { barUntil = DateTime.MinValue; Kick(); }
             else ShowBar(8000);
         }
 
@@ -5229,6 +5239,14 @@ namespace ClipGuard
         }
 
         // ---- drawing the on-screen display (1920 x 1080 units) ---------------------------
+        // 0.9.4: only the bottom bar is up (the overlay's once-a-second repaint can stay inside it)
+        bool OverlayBarOnly()
+        {
+            DateTime now = DateTime.Now;
+            return BarOn() && !menuOpen && now >= msgUntil && !(depthOpen && now < depthUntil)
+                && !(capturing && now < capUntil) && !xmcMenu && !VolumeOn();
+        }
+
         void DrawOverlay(Graphics g, Size size)
         {
             float sc = size.Height / 1080f;
@@ -5252,7 +5270,8 @@ namespace ClipGuard
 
         static void TxtR(Graphics g, string s, float size, bool bold, Color c, float right, float y)
         {
-            using (Font f = F(size, bold)) using (SolidBrush b = new SolidBrush(c))
+            Font f = FontC(size, bold);
+            using (SolidBrush b = new SolidBrush(c))
             {
                 SizeF z = g.MeasureString(s, f);
                 g.DrawString(s, f, b, right - z.Width, y);
@@ -5271,7 +5290,7 @@ namespace ClipGuard
             // Poster
             RectangleF pr = new RectangleF(x0, top + 28, 126, 189);
             Image post = Img(m, m.Thumb, 252, 378);
-            if (post != null) g.DrawImage(post, pr);
+            if (post != null) DrawFit(g, post, pr);
             else using (SolidBrush b = new SolidBrush(Card)) g.FillRectangle(b, pr);
             float x = pr.Right + 36;
             // Right block: state and end time, the chapter's picture left of it
@@ -5286,7 +5305,7 @@ namespace ClipGuard
                 if (ct != null)
                 {
                     RectangleF cr = new RectangleF(right - 330 - 192, top + 26, 192, 108);
-                    g.DrawImage(ct, cr);
+                    DrawFit(g, ct, cr);
                     titleRight = cr.Left - 24;
                 }
             }
@@ -5296,7 +5315,7 @@ namespace ClipGuard
             {
                 float lh = 66, lw = lh * logo.Width / logo.Height;
                 if (lw > Math.Min(560, titleRight - x)) { lw = Math.Min(560, titleRight - x); lh = lw * logo.Height / logo.Width; }
-                g.DrawImage(logo, new RectangleF(x, top + 26 + (66 - lh) / 2, lw, lh));
+                DrawFit(g, logo, new RectangleF(x, top + 26 + (66 - lh) / 2, lw, lh));
             }
             else TextBox(g, m.Title + (m.Year > 0 ? "  (" + m.Year.ToString(CultureInfo.InvariantCulture) + ")" : ""), 34, true, Color.White, new RectangleF(x, top + 24, titleRight - x, 50));
             if (ci >= 0)
@@ -5509,7 +5528,7 @@ namespace ClipGuard
                 TransparencyKey = KeyColor;
                 DoubleBuffered = true;
                 tick.Interval = 250;
-                tick.Tick += delegate { Kick(); };
+                tick.Tick += delegate { Tick(); };
                 tick.Start();
             }
             protected override bool ShowWithoutActivation { get { return true; } }
@@ -5529,10 +5548,29 @@ namespace ClipGuard
                 if (shown && IsHandleCreated && GetForegroundWindow() == Handle) { SetForegroundWindow(v.Handle); v.Activate(); }
                 Invalidate();
             }
+            // 0.9.4: the 250 ms tick only keeps it shown or hidden; it repaints once a second
+            // (the clock and position), and only the bottom bar's strip when that is all that
+            // shows. Keys (Kick) still repaint at once. Before, the whole 4K window was cleared
+            // and drawn four times a second.
+            int tickN;
+            void Tick()
+            {
+                Form v = owner.video;
+                if (v == null || !v.Visible || !owner.OverlayWanted()) { if (Visible) Hide(); return; }
+                if (!Visible || Bounds != v.Bounds) { Kick(); return; }
+                if (++tickN % 4 != 0) return;
+                if (owner.OverlayBarOnly())
+                {
+                    float sc = ClientSize.Height / 1080f;
+                    int top = (int)Math.Floor((1080 - 252) * sc);
+                    Invalidate(new Rectangle(0, top, ClientSize.Width, ClientSize.Height - top));
+                }
+                else Invalidate();
+            }
             protected override void OnPaintBackground(PaintEventArgs e) { }
             protected override void OnPaint(PaintEventArgs e)
             {
-                e.Graphics.Clear(KeyColor);
+                e.Graphics.Clear(KeyColor);   // honours the clip: only the area being repainted
                 owner.DrawOverlay(e.Graphics, ClientSize);
             }
         }
@@ -6718,16 +6756,100 @@ namespace ClipGuard
             catch (Exception) { }
         }
 
+        // ---- 2.104.0: speed: images and fonts ------------------------------------------
+        // Every image is kept a second time at the exact size it is drawn on the screen
+        // (4K pixels), made once with high-quality scaling, then drawn 1:1. A backdrop's dim
+        // layer is baked into its copy. Before, every redraw rescaled every poster and the
+        // 4K backdrop with the slowest scaling GDI+ has, on each remote key.
+        sealed class ScaledKey : IEquatable<ScaledKey>
+        {
+            public Image Src; public int W, H, Dim; public Color DimC;
+            public bool Equals(ScaledKey o) { return o != null && ReferenceEquals(Src, o.Src) && W == o.W && H == o.H && Dim == o.Dim && DimC.ToArgb() == o.DimC.ToArgb(); }
+            public override bool Equals(object o) { return Equals(o as ScaledKey); }
+            public override int GetHashCode() { return System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Src) ^ (W * 397) ^ (H * 7919) ^ (Dim << 24) ^ DimC.ToArgb(); }
+        }
+        static readonly Dictionary<ScaledKey, LinkedListNode<KeyValuePair<ScaledKey, Bitmap>>> scaled = new Dictionary<ScaledKey, LinkedListNode<KeyValuePair<ScaledKey, Bitmap>>>();
+        static readonly LinkedList<KeyValuePair<ScaledKey, Bitmap>> scaledLru = new LinkedList<KeyValuePair<ScaledKey, Bitmap>>();
+        static long scaledBytes;
+        const long ScaledMax = 320L << 20;   // about 320 MB of ready-sized images
+
+        static Bitmap Scaled(Image src, int w, int h, int dim, Color dimC)
+        {
+            ScaledKey k = new ScaledKey { Src = src, W = w, H = h, Dim = dim, DimC = dimC };
+            LinkedListNode<KeyValuePair<ScaledKey, Bitmap>> node;
+            if (scaled.TryGetValue(k, out node)) { scaledLru.Remove(node); scaledLru.AddFirst(node); return node.Value.Value; }
+            Bitmap b = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            using (Graphics bg = Graphics.FromImage(b))
+            {
+                bg.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                bg.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                bg.CompositingQuality = CompositingQuality.HighQuality;
+                using (System.Drawing.Imaging.ImageAttributes ia = new System.Drawing.Imaging.ImageAttributes())
+                {
+                    ia.SetWrapMode(WrapMode.TileFlipXY);   // clean edges
+                    bg.DrawImage(src, new Rectangle(0, 0, w, h), 0, 0, src.Width, src.Height, GraphicsUnit.Pixel, ia);
+                }
+                if (dim > 0) using (SolidBrush db = new SolidBrush(Color.FromArgb(dim, dimC))) bg.FillRectangle(db, 0, 0, w, h);
+            }
+            node = scaledLru.AddFirst(new KeyValuePair<ScaledKey, Bitmap>(k, b));
+            scaled[k] = node;
+            scaledBytes += (long)w * h * 4;
+            while (scaledBytes > ScaledMax && scaledLru.Count > 1)
+            {
+                LinkedListNode<KeyValuePair<ScaledKey, Bitmap>> last = scaledLru.Last;
+                scaledLru.RemoveLast();
+                scaled.Remove(last.Value.Key);
+                scaledBytes -= (long)last.Value.Value.Width * last.Value.Value.Height * 4;
+                last.Value.Value.Dispose();
+            }
+            return b;
+        }
+
+        // Draws src into r (screen units) through its ready-sized copy. dim: a layer of dimC
+        // at that alpha baked on top (0 = none).
+        static void DrawFit(Graphics g, Image src, RectangleF r, int dim = 0, Color dimC = default(Color))
+        {
+            if (src == null || r.Width <= 0 || r.Height <= 0) return;
+            float s;
+            using (Matrix mt = g.Transform) s = Math.Abs(mt.Elements[0]);
+            if (s <= 0) s = 1;
+            int w = Math.Max(1, (int)Math.Round(r.Width * s)), h = Math.Max(1, (int)Math.Round(r.Height * s));
+            Bitmap b;
+            try { b = Scaled(src, w, h, dim, dimC); }
+            catch (Exception) { g.DrawImage(src, r); return; }   // e.g. out of memory: draw it the old way
+            InterpolationMode im = g.InterpolationMode;
+            PixelOffsetMode po = g.PixelOffsetMode;
+            CompositingQuality cq = g.CompositingQuality;
+            g.InterpolationMode = InterpolationMode.NearestNeighbor;   // 1:1: nothing to scale
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            g.CompositingQuality = CompositingQuality.HighSpeed;
+            g.DrawImage(b, r);
+            g.InterpolationMode = im; g.PixelOffsetMode = po; g.CompositingQuality = cq;
+        }
+
+        // Fonts made once per size and kept (Txt, TextBox and the like made a new one for
+        // every line of text on every redraw).
+        static readonly Dictionary<long, Font> fontCache = new Dictionary<long, Font>();
+        static Font FontC(float size, bool bold)
+        {
+            long k = ((long)Math.Round(size * 100) << 1) | (bold ? 1L : 0L);
+            Font f;
+            if (!fontCache.TryGetValue(k, out f)) { f = F(size, bold); fontCache[k] = f; }
+            return f;
+        }
+        static readonly Dictionary<long, Font> fontCacheC = new Dictionary<long, Font>();
+
         static Font F(float size, bool bold) { return new Font("Segoe UI", size, bold ? FontStyle.Bold : FontStyle.Regular, GraphicsUnit.Pixel); }
 
         static void Txt(Graphics g, string s, float size, bool bold, Color c, float x, float y)
         {
-            using (Font f = F(size, bold)) using (SolidBrush b = new SolidBrush(c)) g.DrawString(s, f, b, x, y);
+            using (SolidBrush b = new SolidBrush(c)) g.DrawString(s, FontC(size, bold), b, x, y);
         }
 
         static void TextBox(Graphics g, string s, float size, bool bold, Color c, RectangleF r)
         {
-            using (Font f = F(size, bold)) using (SolidBrush b = new SolidBrush(c))
+            Font f = FontC(size, bold);
+            using (SolidBrush b = new SolidBrush(c))
             using (StringFormat sf = new StringFormat())
             {
                 sf.Trimming = StringTrimming.EllipsisWord;
@@ -6737,7 +6859,8 @@ namespace ClipGuard
 
         static void Center(Graphics g, string s, float size, Color c, float y)
         {
-            using (Font f = F(size, false)) using (SolidBrush b = new SolidBrush(c))
+            Font f = FontC(size, false);
+            using (SolidBrush b = new SolidBrush(c))
             using (StringFormat sf = new StringFormat())
             {
                 sf.Alignment = StringAlignment.Center;
@@ -6774,7 +6897,7 @@ namespace ClipGuard
         {
             RectangleF r = new RectangleF(x, y, w, h);
             Image im = Img(m, m.Poster, w > 300 ? 720 : 440, w > 300 ? 1080 : 660);   // 2.52.1: sharp on a 4K screen; 2.68.0: an episode shows its show's poster
-            if (im != null) g.DrawImage(im, r);
+            if (im != null) DrawFit(g, im, r);
             else
             {
                 using (SolidBrush b = new SolidBrush(Tones[Math.Abs(idx) % Tones.Length])) g.FillRectangle(b, r);
@@ -7159,11 +7282,7 @@ namespace ClipGuard
         {
             Movie m = det;
             Image art = Img(m, m.Art, 1920, 1080);
-            if (art != null)
-            {
-                g.DrawImage(art, new RectangleF(0, 0, 1920, 1080));
-                using (SolidBrush b = new SolidBrush(Color.FromArgb(200, Bg))) g.FillRectangle(b, 0, 0, 1920, 1080);
-            }
+            if (art != null) DrawFit(g, art, new RectangleF(0, 0, 1920, 1080), 200, Bg);   // 0.9.4
             Poster(g, m, 0, 96, 140, 360, 540, false);
             float x = 520;
             TextBox(g, m.Title, 56, true, Color.White, new RectangleF(x, 140, 1300, 80));

@@ -31,6 +31,12 @@ through a capture card, with the same picture processing.
   folder). Black and white check screens come first, and colours the projector can't
   reach keep its own most saturated colour instead of shifting hue. The white and
   black it measures set the display levels for tone mapping when its LUT is in use.
+  White point: the default is the **Dangbei White Point** (x 0.3034, y 0.3061, CIE 1931
+  2°), which should be perceptually correct for triple laser projectors. A live R / G / B
+  meter beside the white window shows how far each is from it while you set the
+  projector's gains. Two other choices: As set (the white you set by eye), or set by the
+  LUT, for a projector mode whose own controls can't reach it (the LUT turns the
+  channels down, and the results say how much of the projector's white is kept).
 - **Video Processor.** It shows a capture card's HDMI input full screen, with
   ClipGuard and the picture settings applied. It needs an unencrypted HDMI signal (see
   below).
