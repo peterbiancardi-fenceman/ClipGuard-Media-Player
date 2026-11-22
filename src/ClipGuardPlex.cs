@@ -26,6 +26,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Globalization;
 using System.IO;
+using System.IO.MemoryMappedFiles;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -819,13 +820,258 @@ namespace ClipGuard
             Bg2(delegate { CloseUnplugged(); }, delegate { Start(); });
         }
 
+#if PLAYER
+        // ---- anamorphic lens and 12-point screen geometry ----------
+        // Saved as "Screen.screen" in the Calibration folder (next to the LUTs) and loaded
+        // at every start. The renderer reads it through
+        // Local\ClipGuard_view_v1: lens x100, screen x100, the film's aspect x1000 (0 = the
+        // frame's own, -1 = not scope), geometry on, 0, then the 12 points' moves (4 across x
+        // 3 down, row by row, x / y in 1/10000 of the width / height).
+        sealed class ScreenProf
+        {
+            public int Lens, Screen = 240, Mode;   // Mode: 0 Auto, 1 Scope, 2 Not scope
+            public bool GeoOn = true;
+            public int[] Pt = new int[24];
+        }
+        static readonly int[] LensVals = { 0, 125, 133, 150 };
+        ScreenProf scrProf = new ScreenProf();
+        int viewAspect;   // the film's aspect sent with the lens (x1000; 0 frame, -1 not scope)
+        MemoryMappedFile viewMap;
+        MemoryMappedViewAccessor viewAcc;
+        int viewSeq;
+        int viewFilm;   // 0.9.5: counts films, so the renderer starts each one's scope check afresh
+
+        string ScreenFile() { return Path.Combine(CalDir, "Screen.screen"); }
+
+        void LoadScreenProfile()
+        {
+            ScreenProf p = new ScreenProf();
+            bool layout2 = false;
+            try
+            {
+                if (File.Exists(ScreenFile()))
+                    foreach (string line in File.ReadAllLines(ScreenFile()))
+                    {
+                        int eq = line.IndexOf('=');
+                        if (eq <= 0) continue;
+                        string k = line.Substring(0, eq).Trim().ToLowerInvariant(), v = line.Substring(eq + 1).Trim();
+                        int n;
+                        if (k == "lens" && int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n)) p.Lens = Array.IndexOf(LensVals, n) >= 0 ? n : 0;
+                        else if (k == "screen" && int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n)) p.Screen = n == 235 ? 235 : 240;
+                        else if (k == "shape" && int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n)) p.Mode = Math.Max(0, Math.Min(2, n));
+                        else if (k == "geometry") p.GeoOn = v != "0";
+                        else if (k == "layout" && v == "2") layout2 = true;   // 0.9.5
+                        else if (k == "points")
+                        {
+                            string[] parts = v.Split(',');
+                            for (int i = 0; i < 24 && i < parts.Length; i++)
+                                if (int.TryParse(parts[i].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out n)) p.Pt[i] = Math.Max(-2500, Math.Min(2500, n));
+                        }
+                    }
+            }
+            catch (Exception) { }
+            if (!layout2) p.Pt = new int[24];   // 0.9.5: points from the old layout (4 x 3) start again
+            scrProf = p;
+            PublishView();
+        }
+
+        void SaveScreenProfile()
+        {
+            try
+            {
+                Directory.CreateDirectory(CalDir);
+                List<string> pts = new List<string>();
+                foreach (int v in scrProf.Pt) pts.Add(v.ToString(CultureInfo.InvariantCulture));
+                File.WriteAllLines(ScreenFile(), new[] {
+                    "; ClipGuard screen: anamorphic lens and 12-point geometry",
+                    "lens=" + scrProf.Lens.ToString(CultureInfo.InvariantCulture),
+                    "screen=" + scrProf.Screen.ToString(CultureInfo.InvariantCulture),
+                    "shape=" + scrProf.Mode.ToString(CultureInfo.InvariantCulture),
+                    "geometry=" + (scrProf.GeoOn ? "1" : "0"),
+                    "layout=2",
+                    "points=" + string.Join(",", pts.ToArray()) });
+            }
+            catch (Exception) { }
+            PublishView();
+        }
+
+        // Once per film (or capture): the film's shape for the lens. It isn't changed while
+        // the film plays.
+        void ViewForFilm(Movie m)
+        {
+            // 0.9.5: Plex's aspect is the file's (a letterboxed scope film reads 1.78), so Auto
+            // leaves it to the renderer, which reads the letterbox once at the film's start.
+            viewAspect = scrProf.Mode == 1 ? 2400 : (scrProf.Mode == 2 ? -1 : 0);
+            viewFilm++;
+            PublishView();
+        }
+
+        void PublishView()
+        {
+            try
+            {
+                if (viewAcc == null)
+                {
+                    viewMap = MemoryMappedFile.CreateOrOpen(@"Local\ClipGuard_view_v1", 4096);
+                    viewAcc = viewMap.CreateViewAccessor(0, 4096);
+                }
+                int mode = scrProf.Mode;
+                int aspect = mode == 1 ? 2400 : (mode == 2 ? -1 : viewAspect);
+                viewAcc.Write(8, scrProf.Lens);
+                viewAcc.Write(12, scrProf.Screen);
+                viewAcc.Write(16, aspect);
+                viewAcc.Write(20, scrProf.GeoOn ? 1 : 0);
+                viewAcc.Write(24, viewFilm);
+                for (int i = 0; i < 24; i++) viewAcc.Write(28 + i * 4, scrProf.Pt[i]);
+                viewAcc.Write(4, ++viewSeq);
+                viewAcc.Write(0, 0x56574543);
+            }
+            catch (Exception) { }
+            if (playing != null && paused) UnpluggedSettings.Redraw();
+        }
+
+        // ---- Define screen: the editor (the player's own screen, drawn through the same
+        // warp the renderer uses, so what lines up here lines up on films) ----------------
+        bool geoEdit;
+        int geoSel;
+        int[] geoUndo;
+        Keys geoLastKey;
+        DateTime geoLastAt;
+        int geoRun;
+        // 0.9.5: all 12 on the edges: 0-3 the top (left to right), 4-7 the bottom, 8-9 the
+        // left side (upper, lower third), 10-11 the right side. OK goes round clockwise.
+        static readonly string[] GeoPointNames = {
+            "top left corner", "top, left third", "top, right third", "top right corner",
+            "bottom left corner", "bottom, left third", "bottom, right third", "bottom right corner",
+            "left side, upper third", "left side, lower third", "right side, upper third", "right side, lower third" };
+        static readonly int[] GeoOrder = { 0, 1, 2, 3, 10, 11, 7, 6, 5, 4, 9, 8 };
+        static readonly float[] GeoU = { 0f, 1f / 3f, 2f / 3f, 1f, 0f, 1f / 3f, 2f / 3f, 1f, 0f, 0f, 1f, 1f };
+        static readonly float[] GeoV = { 0f, 0f, 0f, 0f, 1f, 1f, 1f, 1f, 1f / 3f, 2f / 3f, 1f / 3f, 2f / 3f };
+
+        void GeoEditStart()
+        {
+            geoUndo = (int[])scrProf.Pt.Clone();
+            geoEdit = true;
+            geoSel = 0;
+            Invalidate();
+        }
+
+        bool GeoEditKey(Keys k)
+        {
+            if (k == Keys.Enter) { geoSel = GeoOrder[(Array.IndexOf(GeoOrder, geoSel) + 1) % 12]; Invalidate(); return true; }
+            if (k == Keys.Back || k == Keys.BrowserBack || k == Keys.Escape)
+            {
+                geoEdit = false;
+                SaveScreenProfile();
+                message = "Screen geometry saved.";
+                Invalidate();
+                return true;
+            }
+            if (k == Keys.MediaStop) { scrProf.Pt = (int[])geoUndo.Clone(); Invalidate(); return true; }   // back to how it was
+            if (k == Keys.Left || k == Keys.Right || k == Keys.Up || k == Keys.Down)
+            {
+                // 1 pixel (at 4K) a press; held or pressed quickly, faster (up to 16)
+                DateTime now = DateTime.Now;
+                geoRun = (k == geoLastKey && (now - geoLastAt).TotalMilliseconds < 300) ? Math.Min(geoRun + 1, 40) : 0;
+                geoLastKey = k; geoLastAt = now;
+                int px = geoRun < 6 ? 1 : (geoRun < 16 ? 4 : 16);
+                int i = geoSel * 2;
+                if (k == Keys.Left) scrProf.Pt[i] -= (int)Math.Round(px * 10000.0 / 3840);
+                if (k == Keys.Right) scrProf.Pt[i] += (int)Math.Round(px * 10000.0 / 3840);
+                if (k == Keys.Up) scrProf.Pt[i + 1] -= (int)Math.Round(px * 10000.0 / 2160);
+                if (k == Keys.Down) scrProf.Pt[i + 1] += (int)Math.Round(px * 10000.0 / 2160);
+                scrProf.Pt[i] = Math.Max(-2500, Math.Min(2500, scrProf.Pt[i]));
+                scrProf.Pt[i + 1] = Math.Max(-2500, Math.Min(2500, scrProf.Pt[i + 1]));
+                Invalidate();
+                return true;
+            }
+            return true;
+        }
+
+        // The same surface as the renderer: each edge a smooth curve through its 4
+        // points (a corner, two thirds, a corner), the inside blended from the four edges
+        // (a Coons patch), so nothing inside can kink.
+        static float Lag4(float t, float a, float b, float c, float d)
+        {
+            float[] n = { 0f, 1f / 3f, 2f / 3f, 1f }, v = { a, b, c, d };
+            float r = 0;
+            for (int j = 0; j < 4; j++) { float l = 1; for (int m = 0; m < 4; m++) if (m != j) l *= (t - n[m]) / (n[j] - n[m]); r += l * v[j]; }
+            return r;
+        }
+        static PointF GeoWarp(int[] pt, float u, float v, float W, float H)
+        {
+            float[] d = new float[2];
+            for (int c = 0; c < 2; c++)
+            {
+                Func<int, float> P = delegate(int i) { return pt[i * 2 + c] / 10000f; };
+                float T = Lag4(u, P(0), P(1), P(2), P(3)), B = Lag4(u, P(4), P(5), P(6), P(7));
+                float L = Lag4(v, P(0), P(8), P(9), P(4)), R = Lag4(v, P(3), P(10), P(11), P(7));
+                float corners = (1 - u) * (1 - v) * P(0) + u * (1 - v) * P(3) + (1 - u) * v * P(4) + u * v * P(7);
+                d[c] = (1 - v) * T + v * B + (1 - u) * L + u * R - corners;
+            }
+            return new PointF((u + d[0]) * W, (v + d[1]) * H);
+        }
+
+        void DrawGeoEdit(Graphics g)
+        {
+            GraphicsState st = g.Save();
+            g.ResetTransform();
+            float W = ClientSize.Width, H = ClientSize.Height;
+            g.Clear(Color.Black);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            int[] pt = scrProf.Pt;
+            float lw = Math.Max(1f, H / 1080f);
+            // the grid: 12 x 6, the lines through the points stronger
+            using (Pen thin = new Pen(Color.FromArgb(150, 150, 150), lw))
+            using (Pen thick = new Pen(Color.White, lw * 2.5f))
+            {
+                for (int i = 0; i <= 12; i++)
+                {
+                    float u = i / 12f;
+                    PointF[] line = new PointF[49];
+                    for (int s2 = 0; s2 <= 48; s2++) line[s2] = GeoWarp(pt, u, s2 / 48f, W, H);
+                    g.DrawLines(i % 4 == 0 ? thick : thin, line);
+                }
+                for (int j = 0; j <= 6; j++)
+                {
+                    float v = j / 6f;
+                    PointF[] line = new PointF[65];
+                    for (int s2 = 0; s2 <= 64; s2++) line[s2] = GeoWarp(pt, s2 / 64f, v, W, H);
+                    g.DrawLines(j % 2 == 0 ? thick : thin, line);   // 0.9.5: the edges and the side points' thirds
+                }
+            }
+            // the 12 points
+            float R = 22 * lw;
+            for (int i = 0; i < 12; i++)
+            {
+                PointF c = GeoWarp(pt, GeoU[i], GeoV[i], W, H);
+                RectangleF rr = new RectangleF(c.X - R, c.Y - R, 2 * R, 2 * R);
+                if (i == geoSel)
+                {
+                    using (SolidBrush b = new SolidBrush(Yellow)) g.FillEllipse(b, rr);
+                    using (Pen p = new Pen(Color.White, lw * 4)) g.DrawEllipse(p, rr);
+                }
+                else using (Pen p = new Pen(Color.White, lw * 3)) g.DrawEllipse(p, rr);
+            }
+            // the instructions, in the middle
+            g.Restore(st);
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(225, 14, 15, 18))) g.FillRectangle(b, 560, 400, 800, 230);
+            using (Pen p = new Pen(Color.White, 2)) g.DrawRectangle(p, 560, 400, 800, 230);
+            Txt(g, "DEFINE SCREEN", 26, true, Color.FromArgb(232, 32, 42), 600, 420);
+            Txt(g, "Point " + (Array.IndexOf(GeoOrder, geoSel) + 1).ToString(CultureInfo.InvariantCulture) + " of 12:  " + GeoPointNames[geoSel], 30, true, Color.White, 600, 470);
+            Txt(g, "Arrows move it onto the screen's edge (hold for faster)", 22, false, Color.White, 600, 525);
+            Txt(g, "OK: next point     Back: save     Stop: undo all", 22, true, Color.White, 600, 565);
+        }
+#endif
+
+
         bool startedOnce;
         void Start()
         {
 #if PLAYER
             // 2.64.0: Picture > Start in: Video Processor starts the capture at once; the
             // library loads behind it.
-            if (!startedOnce) { startedOnce = true; if (Ini("StartIn", "Library") == "VideoProcessor") BeginInvoke((MethodInvoker)delegate { StartCapture(); }); }
+            if (!startedOnce) { startedOnce = true; LoadScreenProfile(); if (Ini("StartIn", "Library") == "VideoProcessor") BeginInvoke((MethodInvoker)delegate { StartCapture(); }); }
 #endif
             if (token.Length == 0) { BeginSignIn(); return; }
             // 2.55.0: the servers that answered last time, and the library as it was, at once;
@@ -1481,6 +1727,7 @@ namespace ClipGuard
 #if PLAYER
             if (calState != 0) return CalDlgKey(k);   // 2.66.0: the calibration dialog has the keyboard
             if (aboutOn) return AboutKey(k);   // 2.89.1
+            if (geoEdit) return GeoEditKey(k);   // 0.9.5
             // 2.73.0: Esc is Back; the player closes only from the Power tab (Alt+F4 stays as a
             // keyboard-only way out).
             if (k == (Keys.Alt | Keys.F4)) { Quit(); return true; }
@@ -2550,7 +2797,7 @@ namespace ClipGuard
 #endif
             },
 #if PLAYER
-            delegate { if (seq != startSeq) return; EndStarting(); Launch(url, startMs, m, false); },
+            delegate { if (seq != startSeq) return; EndStarting(); ViewForFilm(m); Launch(url, startMs, m, false); },   // 0.9.5: the lens fit, once per film
             delegate(Exception ex) { if (seq != startSeq) return; EndStarting(); scr = startFrom; message = ex.Message; Invalidate(); });
 #else
             delegate { Launch(url, startMs, m, false); }, delegate(Exception ex) { scr = Screen2.Details; message = ex.Message; Invalidate(); });
@@ -2840,6 +3087,7 @@ namespace ClipGuard
 
         public void StartCapture()
         {
+            ViewForFilm(null);   // 0.9.5: capture: the frame's own shape (or the override)
             if (player != null || capturing || quitting) return;   // (also from Start in, while the library still loads)
             capDevice = CaptureDevice();
             capturing = true;
@@ -3761,6 +4009,14 @@ namespace ClipGuard
                 else if (key == "!gamma") { if (PHost != null) PHost.SetOutGamma((PHost.OutGamma() + (dir < 0 ? 2 : 1)) % 3); }   // 2.88.1
                 else if (key == "!depth") { if (PHost != null) PHost.SetDepthLevel(PHost.DepthLevel() + dir * 5); }   // 2.94.0
                 else if (key == "!calrun") { if (k == Keys.Enter) CalBegin(); }
+#if PLAYER
+                else if (key == "!lens") { int i = Array.IndexOf(LensVals, scrProf.Lens); scrProf.Lens = LensVals[(Math.Max(0, i) + LensVals.Length + dir) % LensVals.Length]; SaveScreenProfile(); if (ovl != null) ovl.Invalidate(); }   // 0.9.5
+                else if (key == "!scope") { scrProf.Screen = scrProf.Screen == 235 ? 240 : 235; SaveScreenProfile(); }
+                else if (key == "!shape") { scrProf.Mode = (scrProf.Mode + 3 + dir) % 3; SaveScreenProfile(); }
+                else if (key == "!geodef") { if (k == Keys.Enter) GeoEditStart(); }
+                else if (key == "!geo") { scrProf.GeoOn = !scrProf.GeoOn; SaveScreenProfile(); }
+                else if (key == "!georeset") { if (k == Keys.Enter) { scrProf.Pt = new int[24]; SaveScreenProfile(); message = "Screen geometry reset."; } }
+#endif
                 else if (key == "!lut") LutStep(dir);
                 else if (key == "!caldir") { }
                 else if (key == "!copy")
@@ -3795,6 +4051,14 @@ namespace ClipGuard
             if (key == "!depth") return PHost == null ? "-" : (PHost.DepthLevel() == 0 ? "Off" : PHost.DepthLevel().ToString(CultureInfo.InvariantCulture));   // 2.94.0
             if (key == "!copy") return "Press Enter";
             if (key == "!calrun") return "Press Enter";
+#if PLAYER
+            if (key == "!lens") return scrProf.Lens == 0 ? "Off" : (scrProf.Lens / 100.0).ToString("0.00", CultureInfo.InvariantCulture) + "\u00d7";   // 0.9.5
+            if (key == "!scope") return (scrProf.Screen / 100.0).ToString("0.00", CultureInfo.InvariantCulture);
+            if (key == "!shape") return new[] { "Auto", "Scope", "Not scope" }[scrProf.Mode];
+            if (key == "!geodef") return "Press Enter";
+            if (key == "!geo") return scrProf.GeoOn ? "On" : "Off";
+            if (key == "!georeset") return "Press Enter";
+#endif
             if (key == "!lut") return LutName(UnpluggedSettings.LutFile());
             if (key == "!caldir") return CalDir;
             return "";
@@ -5250,8 +5514,9 @@ namespace ClipGuard
         void DrawOverlay(Graphics g, Size size)
         {
             float sc = size.Height / 1080f;
-            float W = size.Width / sc;
-            g.ScaleTransform(sc, sc);
+            float scx = sc / LensSqueeze();   // 0.9.5: squeezed for the lens; the bar still spans the width
+            float W = size.Width / scx;
+            g.ScaleTransform(scx, sc);
             g.SmoothingMode = SmoothingMode.None;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
@@ -5980,6 +6245,14 @@ namespace ClipGuard
                 new PRow(S_GEO, "geo.zoom", "Zoom", null, 1, " %", "Zoom."),
                 new PRow(S_GEO, "geo.panX", "Pan X", null, 1, "", "Pan sideways."),
                 new PRow(S_GEO, "geo.panY", "Pan Y", null, 1, "", "Pan up and down."),
+#if PLAYER
+                new PRow(S_GEO, "!lens", "Anamorphic lens", null, 0, "", "The lens's factor, or Off. With a lens, a scope film (2.2 or wider) fills the screen with its letterbox cut off; any other film fills the screen's height with black at the sides, squeezed for the lens. Decided once per film. Leave Fit mode on Source."),
+                new PRow(S_GEO, "!scope", "Scope screen", null, 0, "", "The screen's shape: 2.35 or 2.40."),
+                new PRow(S_GEO, "!shape", "Film shape", null, 0, "", "Auto: read from the picture at the film's start (a scope letterbox in the first few seconds of picture makes it scope for the whole film; it never switches back). Scope or Not scope: always that."),
+                new PRow(S_GEO, "!geodef", "Define screen...", null, 0, "", "12-point screen geometry, all on the edges: 4 along the top, 4 along the bottom, 2 on each side. Arrows move the point, OK goes to the next one round the edge, Back saves, Stop undoes. Saved and loaded at every start."),
+                new PRow(S_GEO, "!geo", "Screen geometry", null, 0, "", "The defined screen geometry on or off."),
+                new PRow(S_GEO, "!georeset", "Reset geometry", null, 0, "", "Puts all 12 points back where they started."),
+#endif
                 new PRow(S_NLS, "geo.nls", "Enable NLS", null, 0, "", "Non-linear stretch on or off."),
                 new PRow(S_NLS, "geo.nlsBars", "Bars removed", null, 1, " %", "How much of the letterbox the fill takes (100 fills the screen)."),
                 new PRow(S_NLS, "geo.nlsAxis", "Axis", new[] { "Horizontal", "Vertical", "Split" }, 0, "", "Which axis carries the correction. Horizontal never stretches height."),
@@ -6589,15 +6862,27 @@ namespace ClipGuard
         bool DialogOpen()
         {
 #if PLAYER
-            if (calState != 0 || aboutOn) return true;
+            if (calState != 0 || aboutOn || geoEdit) return true;
 #endif
             return learning;
+        }
+
+        // 0.9.5: with an anamorphic lens the player's own screens are drawn squeezed sideways
+        // by its factor (centred), so through the lens they come out the right shape.
+        float LensSqueeze()
+        {
+#if PLAYER
+            return scrProf.Lens > 100 ? scrProf.Lens / 100f : 1f;
+#else
+            return 1f;
+#endif
         }
 
         PointF ToLayout(Point p)
         {
             float sx = ClientSize.Width / 1920f, sy = ClientSize.Height / 1080f, sc = Math.Min(sx, sy);
-            return new PointF((p.X - (ClientSize.Width - 1920 * sc) / 2) / sc, (p.Y - (ClientSize.Height - 1080 * sc) / 2) / sc);
+            float scx = sc / LensSqueeze();
+            return new PointF((p.X - (ClientSize.Width - 1920 * scx) / 2) / scx, (p.Y - (ClientSize.Height - 1080 * sc) / 2) / sc);
         }
 
         HitZone HitAt(Point p)
@@ -6717,8 +7002,9 @@ namespace ClipGuard
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             float sx = ClientSize.Width / 1920f, sy = ClientSize.Height / 1080f, sc = Math.Min(sx, sy);
-            g.TranslateTransform((ClientSize.Width - 1920 * sc) / 2, (ClientSize.Height - 1080 * sc) / 2);
-            g.ScaleTransform(sc, sc);
+            float scx = sc / LensSqueeze();   // 0.9.5
+            g.TranslateTransform((ClientSize.Width - 1920 * scx) / 2, (ClientSize.Height - 1080 * sc) / 2);
+            g.ScaleTransform(scx, sc);
             hits.Clear();   // 0.9.2: the mouse targets, as drawn
             try
             {
@@ -6750,6 +7036,7 @@ namespace ClipGuard
 #if PLAYER
                 if (calState != 0) DrawCalDlg(g);
                 if (aboutOn) DrawAbout(g);   // 2.89.1
+                if (geoEdit) DrawGeoEdit(g);   // 0.9.5
                 DrawVolume(g, 1920);   // 2.81.0: our volume card
 #endif
             }
@@ -6810,10 +7097,11 @@ namespace ClipGuard
         static void DrawFit(Graphics g, Image src, RectangleF r, int dim = 0, Color dimC = default(Color))
         {
             if (src == null || r.Width <= 0 || r.Height <= 0) return;
-            float s;
-            using (Matrix mt = g.Transform) s = Math.Abs(mt.Elements[0]);
+            float s, sy;
+            using (Matrix mt = g.Transform) { s = Math.Abs(mt.Elements[0]); sy = Math.Abs(mt.Elements[3]); }
             if (s <= 0) s = 1;
-            int w = Math.Max(1, (int)Math.Round(r.Width * s)), h = Math.Max(1, (int)Math.Round(r.Height * s));
+            if (sy <= 0) sy = s;
+            int w = Math.Max(1, (int)Math.Round(r.Width * s)), h = Math.Max(1, (int)Math.Round(r.Height * sy));   // 0.9.5: x and y apart (the lens squeeze)
             Bitmap b;
             try { b = Scaled(src, w, h, dim, dimC); }
             catch (Exception) { g.DrawImage(src, r); return; }   // e.g. out of memory: draw it the old way

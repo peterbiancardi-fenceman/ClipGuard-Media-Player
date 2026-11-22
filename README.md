@@ -37,6 +37,12 @@ through a capture card, with the same picture processing.
   projector's gains. Two other choices: As set (the white you set by eye), or set by the
   LUT, for a projector mode whose own controls can't reach it (the LUT turns the
   channels down, and the results say how much of the projector's white is kept).
+- **Anamorphic lens and screen geometry.** With a lens set (1.25x, 1.33x or 1.5x)
+  and a 2.35 or 2.40 screen, a scope film fills the screen with its letterbox cut off,
+  and any other film fills the screen's height with black at the sides. Each film is
+  decided once, from the picture (credits ignored) or set by hand, and never switches
+  while it plays. Define screen sets 12 points on the screen's edges; the picture is
+  redrawn to fit them with EWA Lanczos. Both are in Settings > Picture.
 - **Video Processor.** It shows a capture card's HDMI input full screen, with
   ClipGuard and the picture settings applied. It needs an unencrypted HDMI signal (see
   below).
