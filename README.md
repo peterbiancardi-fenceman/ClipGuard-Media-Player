@@ -43,7 +43,7 @@ through a capture card, with the same picture processing.
   letterbox is cut off too) with black at the sides. Each film is decided once, from the
   picture (credits ignored) or set by hand, and never switches while it plays. Lens
   upscale: Lightweight (Lanczos3), Standard (RAVU-Zoom-AR) or Neural 2x first (FSRCNNX,
-  then SSimDownscaler; a powerful GPU is required). Define screen sets 12 points on the
+  then SSimDownscaler; a powerful GPU with at least 8 GB of video memory is required). Define screen sets 12 points on the
   screen's edges; the picture is redrawn to fit them with EWA Lanczos, menus included.
   All are in Settings > Picture.
 - **Scaling and detail.** RAVU-Zoom-AR upscales anything that isn't about 2x (FSRCNNX
