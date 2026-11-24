@@ -708,6 +708,12 @@ namespace ClipGuard
 #endif
 #if PLAYER
             if (PHost != null) { IPlayerHost ph = PHost; UnpluggedSettings.GetFsr = ph.NeuralUpscaler; UnpluggedSettings.SetFsr = ph.SetNeuralUpscaler; }
+#if PLAYER
+            UnpluggedSettings.GetCg = ChromaCg;   // 2.111.0
+            UnpluggedSettings.SetCg = delegate(int v) { SetIni("ChromaGuided", Math.Max(0, Math.Min(2, v)).ToString(CultureInfo.InvariantCulture)); PublishView(); };
+            UnpluggedSettings.GetSsim = SsimDown;   // 0.9.6
+            UnpluggedSettings.SetSsim = delegate(int v) { SetIni("SsimDown", v == 1 ? "1" : "0"); PublishView(); };
+#endif
             // 2.66.0: the LUT moved from ClipGuard's LUT row to Picture > Calibration LUT; the
             // Titan / Valerion LUT that was chosen there is chosen here, once.
             try
@@ -923,6 +929,16 @@ namespace ClipGuard
                 viewAcc.Write(20, scrProf.GeoOn ? 1 : 0);
                 viewAcc.Write(24, viewFilm);
                 for (int i = 0; i < 24; i++) viewAcc.Write(28 + i * 4, scrProf.Pt[i]);
+                int cbs = ClipBitState();   // 2.109.0: ClipBit decides
+                viewAcc.Write(124, cbs != 0 ? DetDetail() : 0);
+                viewAcc.Write(128, cbs != 0 ? DetGrain() : 0);
+                viewAcc.Write(132, cbs);
+                viewAcc.Write(136, (int)Math.Min(int.MaxValue, ClipBitKbps()));
+                viewAcc.Write(140, ClipBitMode());
+                viewAcc.Write(144, LensUp());   // 2.110.0 (2.115.0: 0 Standard, 1 Neural 2x first, 2 Lightweight)
+                viewAcc.Write(148, ChromaCg());   // 2.111.0
+                viewAcc.Write(152, Ini("Ravu", "1") == "1" ? 1 : 0);   // 2.114.0: RAVU-Zoom-AR for upscales
+                viewAcc.Write(156, SsimDown());   // 2.114.0: SSimDownscaler for downscales
                 viewAcc.Write(4, ++viewSeq);
                 viewAcc.Write(0, 0x56574543);
             }
@@ -998,6 +1014,123 @@ namespace ClipGuard
             for (int j = 0; j < 4; j++) { float l = 1; for (int m = 0; m < 4; m++) if (m != j) l *= (t - n[m]) / (n[j] - n[m]); r += l * v[j]; }
             return r;
         }
+        // ---- 2.108.0: the screen geometry on the player's own screens (menus, library, and the
+        // playback bar and banners over the film). The renderer only bends the film; these are
+        // drawn by the player, so each is drawn whole, then bent the same way: a map from each
+        // screen pixel to the spot it shows (made once from the 12 points, the renderer's
+        // 48 x 27 mesh filled in), then bilinear. Keyed: the overlay's see-through colour
+        // stays exact, so its shape stays see-through.
+        bool GeoActive()
+        {
+            if (!scrProf.GeoOn || geoEdit || scrProf.Pt == null) return false;
+            foreach (int v in scrProf.Pt) if (v != 0) return true;
+            return false;
+        }
+        sealed class GeoMap
+        {
+            public int W, H; public string Key;
+            public int[] Src;      // source pixel index (top-left tap), -1 = outside the picture
+            public byte[] Fx, Fy;  // the bilinear fractions, 0-255
+        }
+        static GeoMap geoMap;
+        static int[] geoBufA, geoBufO;
+        static readonly object geoMapLock = new object();
+        static GeoMap GetGeoMap(int[] pt, int W, int H)
+        {
+            string key = W + "x" + H + ":" + string.Join(",", Array.ConvertAll(pt, delegate(int x) { return x.ToString(CultureInfo.InvariantCulture); }));
+            lock (geoMapLock)
+            {
+                if (geoMap != null && geoMap.Key == key) return geoMap;
+                GeoMap m = new GeoMap { W = W, H = H, Key = key, Src = new int[W * H], Fx = new byte[W * H], Fy = new byte[W * H] };
+                for (int i = 0; i < m.Src.Length; i++) m.Src[i] = -1;
+                const int NX = 48, NY = 27;
+                PointF[,] P = new PointF[NX + 1, NY + 1];
+                for (int j = 0; j <= NY; j++) for (int i = 0; i <= NX; i++) P[i, j] = GeoWarp(pt, i / (float)NX, j / (float)NY, W, H);
+                Action<PointF, PointF, PointF, PointF, PointF, PointF> tri = delegate(PointF a, PointF b, PointF c, PointF ua, PointF ub, PointF uc)
+                {
+                    float den = (b.Y - c.Y) * (a.X - c.X) + (c.X - b.X) * (a.Y - c.Y);
+                    if (Math.Abs(den) < 1e-6f) return;
+                    int x0 = Math.Max(0, (int)Math.Floor(Math.Min(a.X, Math.Min(b.X, c.X)))), x1 = Math.Min(W - 1, (int)Math.Ceiling(Math.Max(a.X, Math.Max(b.X, c.X))));
+                    int y0 = Math.Max(0, (int)Math.Floor(Math.Min(a.Y, Math.Min(b.Y, c.Y)))), y1 = Math.Min(H - 1, (int)Math.Ceiling(Math.Max(a.Y, Math.Max(b.Y, c.Y))));
+                    for (int y = y0; y <= y1; y++)
+                    {
+                        float py = y + 0.5f;
+                        for (int x = x0; x <= x1; x++)
+                        {
+                            float px = x + 0.5f;
+                            float l1 = ((b.Y - c.Y) * (px - c.X) + (c.X - b.X) * (py - c.Y)) / den;
+                            float l2 = ((c.Y - a.Y) * (px - c.X) + (a.X - c.X) * (py - c.Y)) / den;
+                            float l3 = 1 - l1 - l2;
+                            if (l1 < -1e-4f || l2 < -1e-4f || l3 < -1e-4f) continue;
+                            float sxp = (l1 * ua.X + l2 * ub.X + l3 * uc.X) * W - 0.5f;
+                            float syp = (l1 * ua.Y + l2 * ub.Y + l3 * uc.Y) * H - 0.5f;
+                            sxp = Math.Max(0, Math.Min(W - 1.001f, sxp)); syp = Math.Max(0, Math.Min(H - 1.001f, syp));
+                            int ix = (int)sxp, iy = (int)syp, o = y * W + x;
+                            m.Src[o] = iy * W + ix;
+                            m.Fx[o] = (byte)((sxp - ix) * 255); m.Fy[o] = (byte)((syp - iy) * 255);
+                        }
+                    }
+                };
+                for (int j = 0; j < NY; j++)
+                    for (int i = 0; i < NX; i++)
+                    {
+                        PointF u00 = new PointF(i / (float)NX, j / (float)NY), u10 = new PointF((i + 1) / (float)NX, j / (float)NY);
+                        PointF u01 = new PointF(i / (float)NX, (j + 1) / (float)NY), u11 = new PointF((i + 1) / (float)NX, (j + 1) / (float)NY);
+                        tri(P[i, j], P[i + 1, j], P[i, j + 1], u00, u10, u01);
+                        tri(P[i + 1, j], P[i + 1, j + 1], P[i, j + 1], u10, u11, u01);
+                    }
+                geoMap = m;
+                return m;
+            }
+        }
+        // Bends src (32bpp, W x H) into a new bitmap. key != 0: that colour stays exact (taps of
+        // it are left out of the mix; a pixel nearest to it stays it), outside = key; else black.
+        static Bitmap GeoBend(Bitmap src, int[] pt, int key)
+        {
+            int W = src.Width, H = src.Height;
+            GeoMap m = GetGeoMap(pt, W, H);
+            System.Drawing.Imaging.PixelFormat pf = System.Drawing.Imaging.PixelFormat.Format32bppArgb;
+            Rectangle r = new Rectangle(0, 0, W, H);
+            if (geoBufA == null || geoBufA.Length != W * H) { geoBufA = new int[W * H]; geoBufO = new int[W * H]; }   // kept: no 4K garbage per redraw
+            int[] a = geoBufA, o = geoBufO;
+            System.Drawing.Imaging.BitmapData bd = src.LockBits(r, System.Drawing.Imaging.ImageLockMode.ReadOnly, pf);
+            try { System.Runtime.InteropServices.Marshal.Copy(bd.Scan0, a, 0, a.Length); } finally { src.UnlockBits(bd); }
+            int outside = key != 0 ? key : unchecked((int)0xFF000000);
+            System.Threading.Tasks.Parallel.For(0, H, delegate(int y)
+            {
+                int row = y * W;
+                for (int x = 0; x < W; x++)
+                {
+                    int i = row + x, s0 = m.Src[i];
+                    if (s0 < 0) { o[i] = outside; continue; }
+                    int fx = m.Fx[i], fy = m.Fy[i];
+                    int sx = s0 % W;
+                    int s1 = sx < W - 1 ? s0 + 1 : s0, s2 = s0 + W < a.Length ? s0 + W : s0, s3 = s2 + (s1 - s0);
+                    int c0 = a[s0], c1 = a[s1], c2 = a[s2], c3 = a[s3];
+                    int w0 = (255 - fx) * (255 - fy), w1 = fx * (255 - fy), w2 = (255 - fx) * fy, w3 = fx * fy;
+                    if (key != 0)
+                    {
+                        int near = fx < 128 ? (fy < 128 ? c0 : c2) : (fy < 128 ? c1 : c3);
+                        if (near == key) { o[i] = key; continue; }
+                        if (c0 == key) w0 = 0; if (c1 == key) w1 = 0; if (c2 == key) w2 = 0; if (c3 == key) w3 = 0;
+                    }
+                    int wt = w0 + w1 + w2 + w3;
+                    if (wt <= 0) { o[i] = c0; continue; }
+                    int rr = (((c0 >> 16) & 255) * w0 + ((c1 >> 16) & 255) * w1 + ((c2 >> 16) & 255) * w2 + ((c3 >> 16) & 255) * w3) / wt;
+                    int gg = (((c0 >> 8) & 255) * w0 + ((c1 >> 8) & 255) * w1 + ((c2 >> 8) & 255) * w2 + ((c3 >> 8) & 255) * w3) / wt;
+                    int bb = ((c0 & 255) * w0 + (c1 & 255) * w1 + (c2 & 255) * w2 + (c3 & 255) * w3) / wt;
+                    int px = unchecked((int)0xFF000000) | (rr << 16) | (gg << 8) | bb;
+                    if (key != 0 && px == key) px ^= 0x010000;   // a mix that lands on the key would show through
+                    o[i] = px;
+                }
+            });
+            Bitmap dst = new Bitmap(W, H, pf);
+            bd = dst.LockBits(r, System.Drawing.Imaging.ImageLockMode.WriteOnly, pf);
+            try { System.Runtime.InteropServices.Marshal.Copy(o, 0, bd.Scan0, o.Length); } finally { dst.UnlockBits(bd); }
+            return dst;
+        }
+        int[] GeoPts() { return GeoActive() ? (int[])scrProf.Pt.Clone() : null; }
+
         static PointF GeoWarp(int[] pt, float u, float v, float W, float H)
         {
             float[] d = new float[2];
@@ -4010,6 +4143,16 @@ namespace ClipGuard
                 else if (key == "!depth") { if (PHost != null) PHost.SetDepthLevel(PHost.DepthLevel() + dir * 5); }   // 2.94.0
                 else if (key == "!calrun") { if (k == Keys.Enter) CalBegin(); }
 #if PLAYER
+                else if (key == "!clipbit") { SetIni("ClipBit", ((ClipBitMode() + 6 + dir) % 6).ToString(CultureInfo.InvariantCulture)); PublishView(); }   // 0.9.6
+                else if (key == "!cbdetail") { SetIni("BitrateDetail", Math.Max(0, Math.Min(100, DetDetail() + dir * 5)).ToString(CultureInfo.InvariantCulture)); PublishView(); }
+                else if (key == "!cbgrain") { SetIni("BitrateGrain", Math.Max(0, Math.Min(100, DetGrain() + dir * 5)).ToString(CultureInfo.InvariantCulture)); PublishView(); }
+                else if (key == "!lensup")   // 0.9.6: Lightweight / Standard / Neural 2x first
+                {
+                    int[] order = { 2, 0, 1 };
+                    int at = Array.IndexOf(order, LensUp());
+                    SetIni("LensUpscale", order[((at + dir) % 3 + 3) % 3].ToString(CultureInfo.InvariantCulture)); PublishView();
+                }
+                else if (key == "!ravu") { SetIni("Ravu", Ini("Ravu", "1") == "1" ? "0" : "1"); PublishView(); }
                 else if (key == "!lens") { int i = Array.IndexOf(LensVals, scrProf.Lens); scrProf.Lens = LensVals[(Math.Max(0, i) + LensVals.Length + dir) % LensVals.Length]; SaveScreenProfile(); if (ovl != null) ovl.Invalidate(); }   // 0.9.5
                 else if (key == "!scope") { scrProf.Screen = scrProf.Screen == 235 ? 240 : 235; SaveScreenProfile(); }
                 else if (key == "!shape") { scrProf.Mode = (scrProf.Mode + 3 + dir) % 3; SaveScreenProfile(); }
@@ -4026,7 +4169,16 @@ namespace ClipGuard
                             ? "Picture settings copied again from Unplugged."
                             : "Unplugged's settings were not found, so nothing was copied.";
                 }
-                else UnpluggedSettings.PictureStep(rows[picIdx], dir);
+                else
+                {
+                    UnpluggedSettings.PictureStep(rows[picIdx], dir);
+                    if (key == "hdr.outputGamut" && Ini("Bt2020Flag", "1") != "0")   // 2.108.0: the flag follows it at once
+                    {
+                        string dev = FrmDevice();
+                        bool bt2020 = UnpluggedSettings.Output2020();
+                        ThreadPool.QueueUserWorkItem(delegate { NvRange.SendColorimetry(dev, bt2020); });
+                    }
+                }
             }
             else return false;
             Invalidate();
@@ -4052,6 +4204,11 @@ namespace ClipGuard
             if (key == "!copy") return "Press Enter";
             if (key == "!calrun") return "Press Enter";
 #if PLAYER
+            if (key == "!clipbit") return ClipBitNames[ClipBitMode()];   // 0.9.6
+            if (key == "!cbdetail") return DetDetail() == 0 ? "Off" : DetDetail().ToString(CultureInfo.InvariantCulture);
+            if (key == "!cbgrain") return DetGrain() == 0 ? "Off" : DetGrain().ToString(CultureInfo.InvariantCulture);
+            if (key == "!lensup") { int lu = LensUp(); return lu == 1 ? "Neural 2\u00d7 first" : (lu == 2 ? "Lightweight" : "Standard"); }
+            if (key == "!ravu") return Ini("Ravu", "1") == "1" ? "On" : "Off";
             if (key == "!lens") return scrProf.Lens == 0 ? "Off" : (scrProf.Lens / 100.0).ToString("0.00", CultureInfo.InvariantCulture) + "\u00d7";   // 0.9.5
             if (key == "!scope") return (scrProf.Screen / 100.0).ToString("0.00", CultureInfo.InvariantCulture);
             if (key == "!shape") return new[] { "Auto", "Scope", "Not scope" }[scrProf.Mode];
@@ -4181,7 +4338,7 @@ namespace ClipGuard
                     set.dmDisplayFrequency = hz;
                     set.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
                     int rc = ChangeDisplaySettingsExW(dev, ref set, IntPtr.Zero, CDS_FULLSCREEN, IntPtr.Zero);
-                    if (rc == 0) { frmChanged = true; frmHz = hz; return true; }
+                    if (rc == 0) { frmChanged = true; frmHz = hz; Bt2020Later(dev); return true; }
                     return false;
                 }
             }
@@ -4192,7 +4349,83 @@ namespace ClipGuard
         {
             if (!frmChanged) return;
             frmChanged = false; frmHz = 0;
-            try { ChangeDisplaySettingsExW(FrmDevice(), IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero); } catch (Exception) { }
+            string dev = FrmDevice();
+            try { ChangeDisplaySettingsExW(dev, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero); } catch (Exception) { }
+            Bt2020Later(dev);   // 2.106.2
+        }
+
+        // 2.106.2: a mode change can reset the colour data: the BT.2020 flag again once the link is back.
+        void Bt2020Later(string dev)
+        {
+            if (Ini("Bt2020Flag", "1") == "0") return;
+            bool bt2020 = UnpluggedSettings.Output2020();   // 2.108.0
+            ThreadPool.QueueUserWorkItem(delegate { Thread.Sleep(2500); NvRange.SendColorimetry(dev, bt2020); });
+        }
+
+        // 2.106.1: the refresh-rate card near the bottom of the picture: "Changing to 23.976 Hz"
+        // while the projector re-locks, then the rate on its own for a moment once the film plays.
+        string rateHz = "";
+        bool rateChanging;
+        DateTime rateUntil = DateTime.MinValue;
+        static string HzLabel(int hz)
+        {
+            switch (hz)
+            {
+                case 23: return "23.976";
+                case 29: return "29.97";
+                case 59: return "59.94";
+                default: return hz.ToString(CultureInfo.InvariantCulture) + ".00";
+            }
+        }
+        // 0.9.6: ClipBit: Detail and Grain for 4K films under the bitrate limit (Settings).
+        // Mode: 0 Off, 1-4 under 15 / 20 / 25 / 30 Mbps, 5 Always (4K still required).
+        int DetDetail() { return Math.Max(0, Math.Min(100, IniInt("BitrateDetail", 80))); }
+        int DetGrain() { return Math.Max(0, Math.Min(100, IniInt("BitrateGrain", 50))); }
+        static readonly int[] ClipBitLimits = { 0, 15, 20, 25, 30, 0 };
+        static readonly string[] ClipBitNames = { "Off", "Under 15 Mbps", "Under 20 Mbps", "Under 25 Mbps", "Under 30 Mbps", "Always" };
+        int ChromaCg() { return Math.Max(0, Math.Min(2, IniInt("ChromaGuided", 0))); }
+        int SsimDown() { return IniInt("SsimDown", 0) == 1 ? 1 : 0; }
+        int LensUp() { int v = IniInt("LensUpscale", 0); return v == 1 || v == 2 ? v : 0; }
+        int ClipBitMode() { return Math.Max(0, Math.Min(5, IniInt("ClipBit", 3))); }
+        long ClipBitKbps() { Ver v = curVer; return v == null ? 0 : (v.VBitrate > 0 ? v.VBitrate : v.Bitrate); }
+        bool ClipBit4K() { Ver v = curVer; return v != null && v.Res == "4K"; }
+        int ClipBitState()
+        {
+            if (!ClipBit4K()) return 0;
+            int m = ClipBitMode();
+            if (m == 0) return 0;
+            if (m == 5) return 1;
+            long kb = ClipBitKbps();
+            return kb > 0 && kb < ClipBitLimits[m] * 1000L ? 1 : 0;
+        }
+        int IniInt(string k, int d)
+        {
+            int v;
+            return int.TryParse(Ini(k, d.ToString(CultureInfo.InvariantCulture)), NumberStyles.Integer, CultureInfo.InvariantCulture, out v) ? v : d;
+        }
+
+        void RateCard(bool changing)
+        {
+            rateHz = HzLabel(frmHz);
+            rateChanging = changing;
+            rateUntil = DateTime.Now.AddMilliseconds(changing ? 6000 : 2500);
+            Kick();
+        }
+        void DrawRateCard(Graphics g, float W)
+        {
+            string lead = rateChanging ? "Changing to " : "";
+            Font fl = FontC(30, true), fv = FontC(30, true), ft = FontC(18, true);
+            SizeF zl = lead.Length > 0 ? g.MeasureString(lead, fl) : SizeF.Empty;
+            SizeF zv = g.MeasureString(rateHz + " Hz", fv);
+            float w = zl.Width + zv.Width + 72, h = 96;
+            float x = (W - w) / 2, y = BarOn() ? 1080 - 250 - h - 24 : 1080 - h - 70;
+            using (SolidBrush b = new SolidBrush(Bg)) g.FillRectangle(b, x, y, w, h);
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(70, 73, 80))) g.FillRectangle(b, x, y, w, 2);
+            using (Pen p = new Pen(Color.White, 2)) g.DrawRectangle(p, x, y, w, h);
+            using (SolidBrush b = new SolidBrush(Grey)) g.DrawString("FRAME RATE", ft, b, x + 36, y + 12);
+            float tx = x + 36, ty = y + 40;
+            if (lead.Length > 0) using (SolidBrush b = new SolidBrush(Color.White)) g.DrawString(lead, fl, b, tx, ty);
+            using (SolidBrush b = new SolidBrush(Yellow)) g.DrawString(rateHz + " Hz", fv, b, tx + zl.Width, ty);
         }
 
         static string HzName(int hz) { return hz == 23 ? "23.976" : (hz == 59 ? "59.94" : hz.ToString(CultureInfo.InvariantCulture)); }
@@ -4222,6 +4455,7 @@ namespace ClipGuard
                 if (DateTime.Now >= frmResumeAt)
                 {
                     frmResumeAt = DateTime.MaxValue;
+                    RateCard(false);   // 2.106.1
                     if (frmResumePos >= 0) Engine.Cmd("{\"a\":\"seek\",\"pos\":" + (frmResumePos * 10000L).ToString(CultureInfo.InvariantCulture) + "}");
                     Engine.Cmd("{\"a\":\"play\"}");
                 }
@@ -4238,7 +4472,7 @@ namespace ClipGuard
                 Engine.Cmd("{\"a\":\"pause\"}");
                 frmResumePos = at;
                 frmResumeAt = DateTime.Now.AddSeconds(4);
-                Say("Frame rate: " + HzName(frmHz) + " Hz", 4000);
+                RateCard(true);   // 2.106.1
             }
         }
 
@@ -4747,6 +4981,7 @@ namespace ClipGuard
             curUrl = file;
             curVer = m != null && m.Versions.Count > 0 ? m.Versions[Math.Max(0, Math.Min(m.Versions.Count - 1, m.VerIdx))] : null;
             Plex.RememberVer(m, curVer);   // 2.92.0: next time it opens on this version
+            PublishView();   // 0.9.6: ClipBit decides for each film
             depthOpen = false;   // 2.94.0
             // 2.57.0: start on the sound and subtitles Plex has chosen for this film.
             audioCur = PlexTrack(curVer == null ? null : curVer.Audios);
@@ -4759,7 +4994,7 @@ namespace ClipGuard
             logoImg = null;
             barUntil = DateTime.MinValue; msgUntil = DateTime.MinValue;
             capturing = false;
-            frmDone = false; frmResumeAt = DateTime.MaxValue; frmResumePos = -1; lutCompareOff = false;
+            frmDone = false; rateUntil = DateTime.MinValue; frmResumeAt = DateTime.MaxValue; frmResumePos = -1; lutCompareOff = false;
             if (PHost != null) PHost.SetPlayerSource(1);   // 2.64.1: the Media Player's look-ahead
             EnsureVideo();
             Hide();
@@ -5011,7 +5246,7 @@ namespace ClipGuard
 
         bool PreviewOn() { return seekTarget >= 0 && DateTime.Now < seekHold; }
         bool BarOn() { return !lipSync && playing != null && (DateTime.Now < barUntil || PreviewOn()); }   // 0.9.4: not held up while paused
-        bool OverlayWanted() { return player != null && ((depthOpen && DateTime.Now < depthUntil) || DateTime.Now < msgUntil || VolumeOn() || xmcMenu || BarOn() || menuOpen || (capturing && DateTime.Now < capUntil)); }
+        bool OverlayWanted() { return player != null && ((depthOpen && DateTime.Now < depthUntil) || DateTime.Now < msgUntil || DateTime.Now < rateUntil || VolumeOn() || xmcMenu || BarOn() || menuOpen || (capturing && DateTime.Now < capUntil)); }
 
         long PosMs() { return PreviewOn() ? seekTarget / 10000 : Math.Max(0, lastPos); }
         long DurMs() { return Math.Max(lastDur, playing != null ? playing.Duration : 0); }
@@ -5507,7 +5742,7 @@ namespace ClipGuard
         bool OverlayBarOnly()
         {
             DateTime now = DateTime.Now;
-            return BarOn() && !menuOpen && now >= msgUntil && !(depthOpen && now < depthUntil)
+            return BarOn() && !menuOpen && now >= msgUntil && now >= rateUntil && !(depthOpen && now < depthUntil)
                 && !(capturing && now < capUntil) && !xmcMenu && !VolumeOn();
         }
 
@@ -5525,6 +5760,7 @@ namespace ClipGuard
                 if (BarOn()) DrawBar(g, W);
                 if (menuOpen) DrawMenu(g, W);
                 if (DateTime.Now < msgUntil) DrawMsg(g, W);
+                if (DateTime.Now < rateUntil) DrawRateCard(g, W);   // 0.9.6
                 if (depthOpen && DateTime.Now < depthUntil && PHost != null) DrawBeeBar(g, W);   // 2.95.0
                 if (capturing && DateTime.Now < capUntil) DrawCapCard(g, W);
                 if (xmcMenu) DrawXmcMenuCard(g, W);   // 2.86.2
@@ -5824,7 +6060,7 @@ namespace ClipGuard
                 if (v == null || !v.Visible || !owner.OverlayWanted()) { if (Visible) Hide(); return; }
                 if (!Visible || Bounds != v.Bounds) { Kick(); return; }
                 if (++tickN % 4 != 0) return;
-                if (owner.OverlayBarOnly())
+                if (owner.OverlayBarOnly() && owner.GeoPts() == null)   // 2.108.0: bent, it repaints whole
                 {
                     float sc = ClientSize.Height / 1080f;
                     int top = (int)Math.Floor((1080 - 252) * sc);
@@ -5835,6 +6071,20 @@ namespace ClipGuard
             protected override void OnPaintBackground(PaintEventArgs e) { }
             protected override void OnPaint(PaintEventArgs e)
             {
+                int[] gp = owner.GeoPts();   // 2.108.0: bent like the film under it
+                if (gp != null && ClientSize.Width > 16 && ClientSize.Height > 16)
+                {
+                    try
+                    {
+                        using (Bitmap flat = new Bitmap(ClientSize.Width, ClientSize.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                        {
+                            using (Graphics fg = Graphics.FromImage(flat)) { fg.Clear(KeyColor); owner.DrawOverlay(fg, ClientSize); }
+                            using (Bitmap bent = GeoBend(flat, gp, KeyColor.ToArgb())) e.Graphics.DrawImageUnscaled(bent, 0, 0);
+                        }
+                        return;
+                    }
+                    catch (Exception) { }
+                }
                 e.Graphics.Clear(KeyColor);   // honours the clip: only the area being repainted
                 owner.DrawOverlay(e.Graphics, ClientSize);
             }
@@ -6222,6 +6472,11 @@ namespace ClipGuard
                 new PRow(S_ZION, "zion.personEnabled", "Person skin", null, 0, "", "Person skin on or off."),
                 new PRow(S_ZION, "zion.personStrength", "Person skin strength", null, 0.01, "", "Person skin strength."),
                 new PRow(S_ZION, "zion.skinPreserve", "Skin tone preserve", null, 0.01, "", "Person skin: tone preserve."),
+#if PLAYER
+                new PRow(S_ENH, "!clipbit", "ClipBit", null, 0, "", "Brings back fine texture lost to a low bitrate: Detail raises the finest texture (no halos, flat areas left alone) and Grain adds fine film grain. 4K films only. On by itself for films under the limit; Always for every 4K film; Off never. The banner (F6) shows whether it is on."),
+                new PRow(S_ENH, "!cbdetail", "ClipBit detail", null, 0, "", "How much finest texture ClipBit brings back (0-100, 80 recommended)."),
+                new PRow(S_ENH, "!cbgrain", "ClipBit grain", null, 0, "", "How much fine grain ClipBit adds (0-100, 50 recommended). Black and highlights stay clean."),
+#endif
                 new PRow(S_ENH, "!depth", "ClipBee", null, 0, "", "Adds snap and depth: texture, outlines and the separation of foreground from background, on brightness only (0-100, 0 is off, 25 recommended). Grain in flat areas, near-black and highlights are left alone. While watching: Down opens it, Left / Right change it. With ClipBee on, Unplugged's micro contrast is turned off."),
                 new PRow(S_ENH, "postfx.sharpen", "Adaptive sharpen", null, 0, "", "Adaptive sharpening on or off."),
                 new PRow(S_ENH, "postfx.sharpenStr", "Sharpen strength", null, 0.01, "", "How strong the sharpening is."),
@@ -6231,8 +6486,9 @@ namespace ClipGuard
                 new PRow(S_ENH, "postfx.debandIter", "Deband iterations", null, 1, "", "Deband: iterations."),
                 new PRow(S_ENH, "postfx.debandGrain", "Deband grain", null, 1, "", "Deband: grain."),
                 new PRow(S_SCALE, "out.upscaling", "Upscaling", new[] { "Lanczos3", "Jinc2", "FSRCNNX" }, 0, "", "FSRCNNX is ClipGuard's neural upscaler for about 2x (1080p on 4K); other sizes use Jinc2. Also in F7."),
-                new PRow(S_SCALE, "out.downscaling", "Downscaling", new[] { "Lanczos", "BicubicSharp" }, 0, "", "How the picture is downscaled."),
-                new PRow(S_SCALE, "out.chromaScaling", "Chroma upsampling", new[] { "CatmullRom", "KrigBilateral" }, 0, "", "How the colour (chroma) is upscaled."),
+                new PRow(S_SCALE, "out.downscaling", "Downscaling", new[] { "Lanczos", "BicubicSharp", "SSimDownscaler" }, 0, "", "How the picture is downscaled. SSimDownscaler keeps the source's fine detail and contrast that a plain downscale softens."),
+                new PRow(S_SCALE, "!ravu", "RAVU-Zoom-AR", null, 0, "", "Upscales pictures that are not about 2x (where FSRCNNX runs), the lens's taller-only stretch included: sharper edges than Jinc2 or Lanczos, with no ringing. Off: the Upscaling setting."),
+                new PRow(S_SCALE, "out.chromaScaling", "Chroma upsampling", new[] { "CatmullRom", "KrigBilateral", "JointBilateral", "CfL" }, 0, "", "How the colour (chroma) is upscaled to the picture's full size. JointBilateral and CfL use the full-size brightness picture as a guide, for sharper colour edges with no ringing; CfL (chroma from luma) is the sharpest."),
                 new PRow(S_SCALE, "out.superRes", "Super Resolution", null, 0, "", "The graphics card's video super resolution."),
                 new PRow(S_SCALE, "out.rtxVideoHdr", "RTX Video HDR", null, 0, "", "NVIDIA RTX Video HDR (SDR to HDR)."),
                 new PRow(S_SCALE, "out.deinterlace", "Deinterlacing", new[] { "Disable", "Enable", "Hack future frames" }, 0, "", "For interlaced sources (1080i)."),
@@ -6246,8 +6502,9 @@ namespace ClipGuard
                 new PRow(S_GEO, "geo.panX", "Pan X", null, 1, "", "Pan sideways."),
                 new PRow(S_GEO, "geo.panY", "Pan Y", null, 1, "", "Pan up and down."),
 #if PLAYER
-                new PRow(S_GEO, "!lens", "Anamorphic lens", null, 0, "", "The lens's factor, or Off. With a lens, a scope film (2.2 or wider) fills the screen with its letterbox cut off; any other film fills the screen's height with black at the sides, squeezed for the lens. Decided once per film. Leave Fit mode on Source."),
+                new PRow(S_GEO, "!lens", "Anamorphic lens", null, 0, "", "The lens's factor, or Off. With a lens, a scope film (2.2 or wider) fills the screen with its letterbox cut off; any other film fills the screen's height at its own shape (a 2.00 or 2.10 letterbox is cut off too) with black at the sides, squeezed for the lens. Decided once per film. Leave Fit mode on Source."),
                 new PRow(S_GEO, "!scope", "Scope screen", null, 0, "", "The screen's shape: 2.35 or 2.40."),
+                new PRow(S_GEO, "!lensup", "Lens upscale", null, 0, "", "How a scope film is stretched to fill the screen's height for the lens. Lightweight: Lanczos3 (easiest on the GPU). Standard: RAVU-Zoom-AR (the Upscaling setting with RAVU off). Neural 2x first: the letterbox is cut off, the picture is doubled by FSRCNNX, then brought down to the exact size by SSimDownscaler. If frames keep being skipped, it switches itself off for that film. 4K films too. A powerful GPU is required; watch the dropped frames on the banner (F6)."),
                 new PRow(S_GEO, "!shape", "Film shape", null, 0, "", "Auto: read from the picture at the film's start (a scope letterbox in the first few seconds of picture makes it scope for the whole film; it never switches back). Scope or Not scope: always that."),
                 new PRow(S_GEO, "!geodef", "Define screen...", null, 0, "", "12-point screen geometry, all on the edges: 4 along the top, 4 along the bottom, 2 on each side. Arrows move the point, OK goes to the next one round the edge, Back saves, Stop undoes. Saved and loaded at every start."),
                 new PRow(S_GEO, "!geo", "Screen geometry", null, 0, "", "The defined screen geometry on or off."),
@@ -6310,6 +6567,8 @@ namespace ClipGuard
                 if (r.Kind == 4) return string.IsNullOrEmpty(r.File) ? "None" : Path.GetFileName(r.File);
                 if (r.Kind == 0) return r.On ? "On" : "Off";
                 if (r.Key == "out.upscaling" && GetFsr != null && GetFsr() > 0) return GetFsr() == 2 ? "ArtCNN C4F32" : "FSRCNNX";
+                if (r.Key == "out.chromaScaling" && GetCg != null && GetCg() > 0) return GetCg() == 2 ? "CfL" : "JointBilateral";   // 2.111.0
+                if (r.Key == "out.downscaling" && GetSsim != null && GetSsim() > 0) return "SSimDownscaler";   // 2.114.0
                 if (r.Kind == 2) return p.Names != null && r.Opt >= 0 && r.Opt < p.Names.Length ? p.Names[r.Opt] : r.Opt.ToString(CultureInfo.InvariantCulture);
                 return r.Val.ToString(p.Step < 0.01 ? "0.000" : (p.Step < 0.1 ? "0.00" : (p.Step < 1 ? "0.0" : "0")), CultureInfo.InvariantCulture) + p.Unit + (r.FromLut ? " (LUT)" : "");
             }
@@ -6324,7 +6583,18 @@ namespace ClipGuard
                 return Show(Find(rows, p.Key), p);
             }
 
+            // 2.108.0: Output gamut is BT.2020 (the colorimetry flag follows it)
+            public static bool Output2020()
+            {
+                try { R r = Find(Load(), "hdr.outputGamut"); return r != null && r.Opt == 1; }
+                catch (Exception) { return false; }
+            }
+
             public static Func<int> GetFsr;      // 2.85.0: 0 none, 1 FSRCNNX, 2 ArtCNN C4F32
+            public static Func<int> GetCg;       // 2.111.0: chroma: 0 Unplugged's, 1 JointBilateral, 2 CfL
+            public static Action<int> SetCg;
+            public static Func<int> GetSsim;     // 2.114.0: downscaling: 1 SSimDownscaler (over Unplugged's choice)
+            public static Action<int> SetSsim;
             public static Action<int> SetFsr;
 
             public static void PictureStep(int i, int dir)
@@ -6351,6 +6621,26 @@ namespace ClipGuard
                     int o = ((cur + dir) % 4 + 4) % 4;
                     SetValue(r.Key, (o == 0 ? r.OptVals[0] : r.OptVals[1]).ToString(CultureInfo.InvariantCulture));
                     SetFsr(o >= 2 ? o - 1 : 0);
+                }
+                else if (r.Key == "out.downscaling" && SetSsim != null)
+                {
+                    // 2.114.0: Lanczos, BicubicSharp, SSimDownscaler (through ClipGuard; Unplugged's
+                    // choice stays set underneath it).
+                    int cur = (GetSsim != null && GetSsim() > 0) ? 2 : r.Opt;
+                    int o = ((cur + dir) % 3 + 3) % 3;
+                    if (o < 2) SetValue(r.Key, r.OptVals[o].ToString(CultureInfo.InvariantCulture));
+                    SetSsim(o == 2 ? 1 : 0);
+                }
+                else if (r.Key == "out.chromaScaling" && SetCg != null)
+                {
+                    // 2.111.0: CatmullRom, KrigBilateral, JointBilateral, CfL. The last two go to the
+                    // renderer through ClipGuard (Unplugged knows only the first two; KrigBilateral
+                    // stays set underneath them).
+                    int cg = GetCg != null ? GetCg() : 0;
+                    int cur = cg > 0 ? 1 + cg : r.Opt;
+                    int o = ((cur + dir) % 4 + 4) % 4;
+                    SetValue(r.Key, (o == 0 ? r.OptVals[0] : r.OptVals[1]).ToString(CultureInfo.InvariantCulture));
+                    SetCg(o >= 2 ? o - 1 : 0);
                 }
                 else if (r.Kind == 2 && r.NOpts > 0)
                 {
@@ -6996,7 +7286,27 @@ namespace ClipGuard
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            Graphics g = e.Graphics;
+#if PLAYER
+            // 2.108.0: with screen geometry on, drawn whole off screen, then bent to the screen
+            int[] gp = GeoPts();
+            if (gp != null && ClientSize.Width > 16 && ClientSize.Height > 16)
+            {
+                try
+                {
+                    using (Bitmap flat = new Bitmap(ClientSize.Width, ClientSize.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                    {
+                        using (Graphics fg = Graphics.FromImage(flat)) PaintFlat(fg);
+                        using (Bitmap bent = GeoBend(flat, gp, 0)) e.Graphics.DrawImageUnscaled(bent, 0, 0);
+                    }
+                    return;
+                }
+                catch (Exception) { }
+            }
+#endif
+            PaintFlat(e.Graphics);
+        }
+        void PaintFlat(Graphics g)
+        {
             g.Clear(Bg);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;

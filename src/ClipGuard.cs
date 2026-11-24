@@ -548,6 +548,46 @@ namespace ClipGuard
             catch (Exception) { ok = false; }
             return 0;
         }
+
+        // 0.9.6: the BT.2020 flag only: the colorimetry byte (9) of the card's current colour
+        // data goes to BT.2020 (8 for RGB, 9 for YCbCr); format, depth, range and the user's
+        // choice are written back exactly as read. The picture is not touched: the display is
+        // only told the signal's colours are BT.2020, as madVR does. False when refused.
+        public static bool SendBt2020(string device) { return SendColorimetry(device, true); }
+        // 0.9.6: the flag follows Output gamut: BT.2020 (8 RGB / 9 YCbCr) or BT.709 (0 RGB / 2 YCbCr)
+        public static bool SendColorimetry(string device, bool bt2020)
+        {
+            try
+            {
+                if (!tried) Read();
+                if (!ok) return true;
+                uint id;
+                if (idByName(device, out id) != 0) return true;
+                foreach (int[] v in new[] { new[] { 5, 24 }, new[] { 4, 20 } })
+                {
+                    IntPtr buf = Marshal.AllocHGlobal(32);
+                    try
+                    {
+                        for (int i = 0; i < 32; i++) Marshal.WriteByte(buf, i, 0);
+                        Marshal.WriteInt32(buf, 0, v[1] | (v[0] << 16));
+                        Marshal.WriteInt16(buf, 4, (short)v[1]);
+                        Marshal.WriteByte(buf, 6, 1);       // get
+                        if (color(id, buf) != 0) continue;
+                        bool rgb = Marshal.ReadByte(buf, 8) == 0;
+                        byte want = (byte)(bt2020 ? (rgb ? 8 : 9) : (rgb ? 0 : 2));
+                        if (Marshal.ReadByte(buf, 9) == want) return true;
+                        Marshal.WriteInt32(buf, 0, v[1] | (v[0] << 16));
+                        Marshal.WriteInt16(buf, 4, (short)v[1]);
+                        Marshal.WriteByte(buf, 6, 2);       // set, everything else as read
+                        Marshal.WriteByte(buf, 9, want);
+                        return color(id, buf) == 0;
+                    }
+                    finally { Marshal.FreeHGlobal(buf); }
+                }
+            }
+            catch (Exception) { }
+            return true;
+        }
     }
 
     // ---- shared memory with the renderer --------------------------------------

@@ -34,6 +34,17 @@ Bundled components, each under its own licence:
   FSRCNNX upscaler (in the renderer)
       LGPL v3. https://github.com/igv/FSRCNN-TensorFlow
 
+  RAVU-Zoom-AR r3 upscaler and its lookup tables (in the renderer)
+      LGPL v3. Copyright bjin. https://github.com/bjin/mpv-prescalers
+
+  SSimDownscaler (in the renderer)
+      LGPL v3. By igv. https://gist.github.com/igv/36508af3ffc84410fe39761d6969be10
+
+  JointBilateral and CfL chroma upsampling (in the renderer)
+      MIT licence. Copyright (c) 2023 Joao Chrisostomo (Artoriuz).
+      https://github.com/Artoriuz/glsl-joint-bilateral
+      https://github.com/Artoriuz/glsl-chroma-from-luma-prediction
+
   ONNX Runtime (filters\onnxruntime.dll)
       MIT licence. Copyright (c) Microsoft Corporation.
 
