@@ -40,8 +40,10 @@ through a capture card, with the same picture processing.
 - **Anamorphic lens and screen geometry.** With a lens set (1.25x, 1.33x or 1.5x)
   and a 2.35 or 2.40 screen, a scope film fills the screen with its letterbox cut off,
   and any other film fills the screen's height at its own shape (a 2.00 or 2.10
-  letterbox is cut off too) with black at the sides. Each film is decided once, from the
-  picture (credits ignored) or set by hand, and never switches while it plays. Lens
+  letterbox is cut off too) with black at the sides. Each film is decided from its own
+  active-area metadata when it has it (at once), otherwise from the picture (credits
+  ignored), or set by hand. Once a film is scope it stays scope (taller IMAX scenes are
+  cropped top and bottom). Lens
   upscale: Lightweight (Lanczos3), Standard (RAVU-Zoom-AR) or Neural 2x first (FSRCNNX,
   then SSimDownscaler; a powerful GPU with at least 8 GB of video memory is required). Define screen sets 12 points on the
   screen's edges; the picture is redrawn to fit them with EWA Lanczos, menus included.
@@ -98,6 +100,7 @@ Settings and logs are kept in `%LOCALAPPDATA%\ClipGuard`.
 | F5 | Calibration LUT off / on |
 | A | Sound and subtitles |
 | Down | ClipBee, while watching (Left / Right change it, Down closes it) |
+| L | Lens upscale, while watching: Lightweight / Standard / Neural 2x first (works paused too) |
 | I | The film's bar (in a film); Info (in Video Processor) |
 | Alt+F4 | Close the player (or Power > Close ClipGuard Media Player) |
 

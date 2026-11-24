@@ -5316,6 +5316,17 @@ namespace ClipGuard
                 case Keys.A: OpenMenu(0); return true;
                 case Keys.S: OpenMenu(1); return true;
                 case Keys.T: case Keys.Apps: OpenMenu(0); return true;
+                case Keys.L:   // 0.9.7: Lens upscale: Lightweight > Standard > Neural 2x first (paused too, for A/B)
+                    {
+                        int[] order = { 2, 0, 1 };
+                        int at = Array.IndexOf(order, LensUp());
+                        int nv = order[(at + 1) % 3];
+                        SetIni("LensUpscale", nv.ToString(CultureInfo.InvariantCulture));
+                        PublishView();
+                        PausedRedraw(1500);
+                        Say("Lens upscale: " + (nv == 1 ? "Neural 2\u00d7 first" : (nv == 2 ? "Lightweight" : "Standard")), 1500);
+                        return true;
+                    }
                 case Keys.OemOpenBrackets: case Keys.OemCloseBrackets:
                     unpluggedDelay = ClampDelay(unpluggedDelay + (k == Keys.OemCloseBrackets ? 5 : -5));
                     SetIni(DelayKey, unpluggedDelay.ToString(CultureInfo.InvariantCulture));
