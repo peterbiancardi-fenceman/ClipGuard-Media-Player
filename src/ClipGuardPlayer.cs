@@ -24,7 +24,7 @@ namespace ClipGuard
     {
 #if STANDALONE && PUBLIC
         const string Title = "ClipGuard Media Player";
-        public const string MediaPlayerVersion = "0.9.7";   // the public beta's own numbering
+        public const string MediaPlayerVersion = "1.0.0";   // the public release's own numbering
 #elif STANDALONE
         const string Title = "ClipGuard Media Player";
         public const string MediaPlayerVersion = "2.95.1";
@@ -119,8 +119,7 @@ namespace ClipGuard
         // 2.67.0: ClipGuard Media Player, installed on its own (ClipGuard Media Player Setup.exe):
         // everything it needs is in its own folder (engine, decoders, DeckLink filter, renderer,
         // ML models, ArgyllCMS, the meter); its settings are in %LOCALAPPDATA%\ClipGuard\MediaPlayer.
-        // Neither Unplugged nor ClipGuard.exe is used. The first start brings the Test build's
-        // settings over (Plex sign-in, ClipGuard settings, remote, player delay, LUTs).
+        // Neither Unplugged nor ClipGuard.exe is used.
         static int Run(bool updated)
         {
             string exeDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
@@ -142,18 +141,6 @@ namespace ClipGuard
 
             Migrate(seedIni, liveIni);
 
-            Updater.Root = "ClipGuard-MediaPlayer";
-            Updater.Nested = true;
-            Updater.Required = new[] { "ClipGuard Media Player.exe", "filters\\unplugged_vr.ax" };
-            Updater.DeleteOld();
-            if (!updated)
-            {
-                Cursor.Current = Cursors.WaitCursor;
-                bool installed = Updater.Run(exeDir, seedIni);
-                Cursor.Current = Cursors.Default;
-                if (installed) return RestartUpdated;
-            }
-
             ControlForm.PlayerMode = true;
             ControlForm cg = new ControlForm(liveIni, seedIni);
             cg.OpenPlayer(exeDir, dataDir);
@@ -161,10 +148,9 @@ namespace ClipGuard
             return 0;
         }
 
-        // The first start: the Test build's settings, ClipGuard's settings and the LUTs.
+        // The first start: the settings files and the Calibration folder.
         static void Migrate(string seedIni, string liveIni)
         {
-            // Public build: a fresh start, nothing brought over from the test builds.
             try
             {
                 if (!File.Exists(seedIni)) File.WriteAllText(seedIni, "[ClipGuard]\r\n[MediaPlayer]\r\n");
@@ -172,102 +158,7 @@ namespace ClipGuard
                 Directory.CreateDirectory(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipGuard", "Calibration"));
             }
             catch (Exception) { }
-            return;
-            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            try
-            {
-                if (!File.Exists(seedIni))
-                {
-                    string test = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "ClipGuard-Test", "clipguard.ini");
-                    if (File.Exists(test)) File.Copy(test, seedIni);
-                    else File.WriteAllText(seedIni, "[ClipGuard]\r\n[MediaPlayer]\r\n[GitHub]\r\nToken=\r\n");
-                }
-            }
-            catch (Exception) { }
-            try
-            {
-                if (!File.Exists(liveIni))
-                {
-                    string cg = Path.Combine(local, "ClipGuard", "Unplugged", "filters", "clipguard.ini");
-                    if (File.Exists(cg)) File.Copy(cg, liveIni);
-                    else File.Copy(seedIni, liveIni);
-                }
-            }
-            catch (Exception) { }
-            // ClipGuard Meter's Titan / Valerion LUTs into the Calibration folder.
-            try
-            {
-                string cal = Path.Combine(local, "ClipGuard", "Calibration");
-                Directory.CreateDirectory(cal);
-                string test = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "ClipGuard-Test");
-                foreach (string dir in new[] { Path.Combine(local, "ClipGuard", "Unplugged", "filters"), test })
-                    foreach (string n in new[] { "titan.cube", "titan.txt", "valerion.cube", "valerion.txt" })
-                    {
-                        string f = Path.Combine(dir, n), d = Path.Combine(cal, n);
-                        if (File.Exists(f) && !File.Exists(d)) File.Copy(f, d);
-                    }
-            }
-            catch (Exception) { }
         }
-#else
-        static int Run(bool updated)
-        {
-            string exeDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
-            string appDir = Path.GetDirectoryName(exeDir);
-            string seedIni = Path.Combine(appDir, "clipguard.ini");
-            if (!File.Exists(Path.Combine(exeDir, "s3engine.dll")))
-                throw new Exception("s3engine.dll is missing from the Player folder.");
-
-            if (Process.GetProcessesByName("Unplugged").Length > 0 || Process.GetProcessesByName("ClipGuard").Length > 0)
-            {
-                MessageBox.Show("Close ClipGuard (and Unplugged) first, then start the player again.", Title,
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return 1;
-            }
-
-            // 2.56.0: the player updates itself the way ClipGuard does (Test package,
-            // token in clipguard.ini next to ClipGuard.exe), before the engine is loaded.
-            Updater.DeleteOld();
-            if (!updated)
-            {
-                Cursor.Current = Cursors.WaitCursor;
-                bool installed = Updater.Run(appDir, seedIni);
-                Cursor.Current = Cursors.Default;
-                if (installed) return RestartUpdated;
-            }
-
-            string workRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipGuard", "Unplugged");
-            // 2.56.0: and refreshes ClipGuard's copy of Unplugged with the renderer next to
-            // ClipGuard.exe, as ClipGuard does on its start (an update takes effect at once).
-            try { Program.RefreshCopy(appDir, workRoot); }
-            catch (Exception ex) { GitHub.Note("update", "Player: refreshing ClipGuard's copy of Unplugged failed: " + ex.Message); }
-            string srcFilters = Path.Combine(workRoot, "filters");
-            if (!File.Exists(Path.Combine(srcFilters, "unplugged_vr.ax")))
-                throw new Exception("Start ClipGuard once first: the player takes its decoders and the ClipGuard renderer from ClipGuard's copy of Unplugged.");
-
-            // The decoders, the renderer and its clipguard.ini / LUTs, as ClipGuard has them now.
-            CopyNewer(srcFilters, Path.Combine(exeDir, "filters"));
-            // 2.63.3: MPC-BE's MPC Audio Renderer (bitstream) ships next to the player; the
-            // engine loads it from its filters folder.
-            string mar = Path.Combine(exeDir, "MpcAudioRenderer.ax");
-            if (File.Exists(mar)) CopyIfNewer(mar, Path.Combine(exeDir, "filters", "MpcAudioRenderer.ax"));
-            // Runtime DLLs next to Unplugged.exe (not its engine: ours is here).
-            foreach (string f in Directory.GetFiles(workRoot, "*.dll"))
-            {
-                string name = Path.GetFileName(f);
-                if (string.Equals(name, "s3engine.dll", StringComparison.OrdinalIgnoreCase)) continue;
-                CopyIfNewer(f, Path.Combine(exeDir, name));
-            }
-
-            // 2.54.0: ClipGuard itself runs in the player (F7 menu, its keys, the info banner),
-            // on the same settings file as the video processor, so changes carry both ways.
-            ControlForm.PlayerMode = true;
-            ControlForm cg = new ControlForm(Path.Combine(srcFilters, "clipguard.ini"), seedIni);
-            cg.OpenPlayer(appDir, workRoot);
-            Application.Run(cg);
-            return 0;
-        }
-
 #endif
 
         static void CopyNewer(string src, string dst)

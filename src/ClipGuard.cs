@@ -2,10 +2,8 @@
 // renderer's on-screen overlay). Built three times from this file:
 //   ClipGuard       public, for any PC
 //   ClipGuard+      public, /define:PLUS: for higher-end PCs: adds High
-//                   Performance look-ahead, the Upscaler (FSRCNNX) and the
-//                   automatic Look-ahead for a playing Kaleidescape
-//   ClipGuard Test  /define:TEST (implies PLUS): auto-update from GitHub and
-//                   F11 log upload; the public builds have no GitHub code.
+//                   Performance look-ahead and the Upscaler (FSRCNNX)
+//   ClipGuard Media Player  /define:TEST;PLAYER;STANDALONE;PUBLIC
 //
 // Unplugged loads its renderer from <folder of Unplugged.exe>\filters, so the
 // ClipGuard build has to run from a folder of its own. This program keeps one
@@ -21,13 +19,8 @@
 // Settings are saved to filters\clipguard.ini in the copy. It exits with
 // Unplugged.
 //
-// Test build: with a GitHub token in clipguard.ini next to this program
-// ([GitHub] Token=...), each start checks the builds on GitHub and installs a
-// newer ClipGuard Test (the files it replaces go to the backup folder;
-// clipguard.ini is kept). "Restart & update" (or Ctrl+Alt+U) closes Unplugged
-// and starts again, which updates. F11 saves a log (the last 30 s of readout
-// numbers and a screenshot) and sends it to the logs folder of the repository.
-// Public build: F11 saves the log and opens its folder.
+// F11 saves a log (the last 30 s of readout numbers and a screenshot) and
+// opens its folder.
 //
 //
 // Written for C# 5 so it builds with the csc.exe that ships with Windows.
@@ -199,27 +192,6 @@ namespace ClipGuard
                 return 0;
             }
 
-#if TEST
-            // Unplugged is closed: install a newer build if there is one, then
-            // start the new ClipGuard.exe (it carries on from here).
-            Updater.DeleteOld();
-            if (!updated)
-            {
-                Cursor.Current = Cursors.WaitCursor;
-                bool installed = Updater.Run(appDir, seedIni);
-                Cursor.Current = Cursors.Default;
-                if (installed)
-                {
-                    instanceMutex.ReleaseMutex();
-                    instanceMutex.Close();
-                    ProcessStartInfo upd = new ProcessStartInfo(Path.Combine(appDir, "ClipGuard.exe"), "/updated");
-                    upd.WorkingDirectory = appDir;
-                    upd.UseShellExecute = false;
-                    Process.Start(upd);
-                    return 0;
-                }
-            }
-#endif
 
             string srcDir = FindUnplugged(seedIni);
             if (srcDir == null)
@@ -600,7 +572,7 @@ namespace ClipGuard
             OOverlayOn = 28, OPinned = 32, OSelected = 36, OLastKey = 40, OExeTick = 44,
             ORendTick = 48, OPicture = 52, OSceneNits = 56, OAmount = 60, OCeiling = 64, OKneeEff = 68,
             OOutputPQ = 72, OSrcMax = 76, OClipFrac = 80, OBottomBar = 84, OColorProtect = 88, OFullPct = 92, OTextSkip = 96, OHotSpot = 108, OFixShape = 120, OGrid = 128, OLookAhead = 132,
-            OLogRequest = 136, OLogDone = 140, OLogState = 144, OLogStateTick = 148, OHotBelow = 152, OGradedSpot = 156, OBuildKind = 160, OTestMarker = 164, OSpotMask = 168, OInfo = 172, OGpuLoad = 176, ODimFire = 180, OUpscaler = 184, OEdition = 188, OKscape = 192, ODither = 196, OProjector = 200, OLutOff = 204, OLut = 208, OSource = 212, OSsr = 216, OFel = 220, OOutGamma = 224, ODoviEl = 228, OOutRange = 232, ODepthDetail = 236, ODepthEdges = 240, ODepthWide = 244, ODepthView = 248;
+            OLogRequest = 136, OLogDone = 140, OLogState = 144, OLogStateTick = 148, OHotBelow = 152, OGradedSpot = 156, OBuildKind = 160, OTestMarker = 164, OSpotMask = 168, OInfo = 172, OGpuLoad = 176, ODimFire = 180, OUpscaler = 184, OEdition = 188, OPlaySource = 192, ODither = 196, OProjector = 200, OLutOff = 204, OLut = 208, OSource = 212, OSsr = 216, OFel = 220, OOutGamma = 224, ODoviEl = 228, OOutRange = 232, ODepthDetail = 236, ODepthEdges = 240, ODepthWide = 244, ODepthView = 248;
 
         readonly MemoryMappedFile map;
         readonly MemoryMappedViewAccessor view;
@@ -636,8 +608,8 @@ namespace ClipGuard
             view.Write(ODepthWide, s.DepthLevel / 2);
             view.Write(ODepthView, 0);
             view.Write(OEdition, Edition.Plus ? 1 : 0);
-            // 1 = Kaleidescape (ClipGuard+); 2.64.1 (Player): 2 = Video Processor, 3 = Media Player.
-            view.Write(OKscape, s.PlayerSource == 2 ? 2 : (s.PlayerSource == 1 ? 3 : (s.KscapeActive ? 1 : 0)));
+            // 2.64.1 (Player): 2 = Video Processor, 3 = Media Player.
+            view.Write(OPlaySource, s.PlayerSource == 2 ? 2 : (s.PlayerSource == 1 ? 3 : 0));
             view.Write(ODither, s.Dither);
             view.Write(OProjector, s.Projector);
             view.Write(OLutOff, s.LutOff ? 1 : 0);
@@ -665,7 +637,7 @@ namespace ClipGuard
         public void SetGpuLoad(float v) { view.Write(OGpuLoad, v); }
         public void SetOutRange(int v) { view.Write(OOutRange, v); }   // 2.92.0: 0 not known, 1 RGB Full, 2 RGB Limited
 
-        // Log (F11): 0 none, 1 saving, 2 sending, 3 sent, 4 failed, 5 no token.
+        // Log (F11): 0 none, 1 saving, 4 failed, 6 saved.
         public void RequestLog(uint id) { view.Write(OLogRequest, id); }
         public uint LogDone { get { return view.ReadUInt32(OLogDone); } }
         // Hot spot test video: (count << 8) | part, written by the renderer when it sees an end-of-part code.
@@ -807,12 +779,9 @@ namespace ClipGuard
         public int LookAhead = 4;         // frames the picture is held back: 0, 2, 4, 6, 12 = High Performance (ClipGuard+)
         public int View = 0;
         public bool Pinned = false;
-        public string KscapeIP = "auto";  // ClipGuard+: Kaleidescape player address, "auto" (find it) or "off"
-        public int KscapeLookAhead = 2;   // ClipGuard+: Look-ahead while the Kaleidescape plays a movie (2.63.1: 4, was 6; 2.89.2: 2, so the XMC-2's 250 ms covers it)
         public int VpLookAhead = 4;       // 2.64.1 (Player): Look-ahead for Video Processor (capture); LookAhead is the Media Player's
         // not saved
         public int PlayerSource = 0;      // 2.64.1 (Player): 0 none, 1 Media Player (a film), 2 Video Processor (capture)
-        public bool KscapeActive = false; // ClipGuard+: the Kaleidescape is playing, so KscapeLookAhead applies
         public bool OverlayOn = false;
         public int Selected = 0;
         public uint LastKeyTick = 0;
@@ -828,10 +797,10 @@ namespace ClipGuard
             return shown;
         }
 
-        // What the renderer is told: the Kaleidescape look-ahead while it plays.
+        // What the renderer is told: Video Processor's look-ahead while it captures.
         public int EffectiveLookAhead()
         {
-            int v = PlayerSource == 2 ? NormLookAhead(VpLookAhead) : ((Edition.Plus && KscapeActive && PlayerSource == 0) ? NormLookAhead(KscapeLookAhead) : LookAhead);
+            int v = PlayerSource == 2 ? NormLookAhead(VpLookAhead) : LookAhead;
             return Edition.Plus ? v : Math.Min(v, 6);
         }
 
@@ -865,16 +834,8 @@ namespace ClipGuard
             // 2.60.0: 3 = Titan Noir Max DBLE Low (Predictive).
             s.Projector = (pj == 1 || pj == 3) ? pj : 0;
             s.Lut = (int)Clamp(Math.Round(Read(ini, "Lut", pj == 3 ? 1 : pj)), 0, 2);
-            string ip = Native.ReadIni(ini, "ClipGuard", "KaleidescapeIP", "auto").Trim();
-            s.KscapeIP = ip.Length == 0 ? "auto" : ip;
-            s.KscapeLookAhead = NormLookAhead((int)Math.Round(Read(ini, "KaleidescapeLookAhead", 2)));
-            // 2.63.1: the default moved from 6 to 4 frames (the Titan's Predictive modes don't use
-            // frames ahead); a saved 6 from before is moved once.
-            if (Read(ini, "KaleidescapeLookAhead4", 0) < 0.5 && s.KscapeLookAhead == 6) s.KscapeLookAhead = 4;
-            // 2.64.1: Video Processor's look-ahead starts at the Kaleidescape one (4 frames).
+            // 2.64.1: Video Processor's look-ahead (4 frames).
             s.VpLookAhead = NormLookAhead((int)Math.Round(Read(ini, "VideoProcessorLookAhead", 4)));
-            // 2.89.2: 2 frames for the Kaleidescape (2 frames + Unplugged's 100 ms = 183 ms, inside the
-            // XMC-2's 250 ms audio delay; 4 frames was 267 ms); a saved 4 from before is moved once.
             s.View = (int)Clamp(Read(ini, "View", 0), 0, 3);
             s.Pinned = Read(ini, "OverlayPinned", 0) > 0.5;
             return s;
@@ -902,9 +863,6 @@ namespace ClipGuard
             {
                 W(ini, "Upscaler", Upscaler.ToString(CultureInfo.InvariantCulture));
                 W(ini, "SSimSuperRes", Ssr.ToString(CultureInfo.InvariantCulture));
-                W(ini, "KaleidescapeIP", KscapeIP);
-                W(ini, "KaleidescapeLookAhead", KscapeLookAhead.ToString(CultureInfo.InvariantCulture));
-                W(ini, "KaleidescapeLookAhead4", "1");
             }
             W(ini, "Dither", Dither.ToString(CultureInfo.InvariantCulture));
             W(ini, "Projector", Projector.ToString(CultureInfo.InvariantCulture));
@@ -1004,8 +962,7 @@ namespace ClipGuard
         uint logId;
         string logStamp;
         DateTime logStart;
-        bool logBusy, logSending;
-        volatile int logResult;
+        bool logBusy;
 
         public ControlForm(string iniPath, string seedIni)
         {
@@ -1029,33 +986,7 @@ namespace ClipGuard
             focusTimer.Tick += delegate { UpdateKeys(); InfoTimeout(); };
             focusTimer.Start();
             gpuTimer = new System.Threading.Timer(GpuSample, null, 500, 500);
-#if PLUS
-            kscape = new KscapeWatch(s.KscapeIP, Native.ReadIni(iniPath, "ClipGuard", "KaleidescapeLastIP", "").Trim());
-#endif
         }
-
-#if PLUS
-        // ClipGuard+: the Kaleidescape player; while it plays a movie the
-        // renderer gets its look-ahead (KaleidescapeLookAhead, 2 frames since 2.89.2).
-        KscapeWatch kscape;
-        string kscapeSaved;
-        void KscapeTick()
-        {
-            if (kscape == null) return;
-            bool a = kscape.Playing;
-            if (a != s.KscapeActive)
-            {
-                s.KscapeActive = a;
-                shared.Publish(s);
-            }
-            string f = kscape.FoundIP;
-            if (f != null && f != kscapeSaved)
-            {
-                kscapeSaved = f;
-                try { Native.WritePrivateProfileString("ClipGuard", "KaleidescapeLastIP", f, iniPath); } catch (Exception) { }
-            }
-        }
-#endif
 
         // Info banner "GPU load": the card's load as Windows counts it (the 3D
         // figure in Task Manager), read twice a second while the banner shows.
@@ -1353,8 +1284,6 @@ namespace ClipGuard
             logStamp = DateTime.Now.ToString("yyyy-MM-dd_HHmmss", CultureInfo.InvariantCulture) + suffix;
             logStart = DateTime.Now;
             logBusy = true;
-            logSending = false;
-            logResult = 0;
             shared.SetLogState(1);
             shared.RequestLog(logId);
         }
@@ -1362,33 +1291,11 @@ namespace ClipGuard
         void PollLog()
         {
             if (!logBusy) return;
-            if (logSending)
-            {
-                int r = logResult;
-                if (r != 0)
-                {
-                    shared.SetLogState(r);
-                    logBusy = false;
-                }
-                return;
-            }
             if (shared.LogDone == logId)
             {
                 string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipGuard", "logs");
                 string stem = Path.Combine(dir, "log_" + logId.ToString(CultureInfo.InvariantCulture));
                 string stamp = logStamp;
-#if TEST
-                // 2.56.0: the Test build keeps its own copy too (<date>.csv and <date>.png in
-                // this logs folder), whether or not it is sent.
-                bool saved = SaveLog(dir, stem, stamp, true);
-                string token = GitHub.ReadToken(seedIni);
-                if (token.Length == 0) { shared.SetLogState(saved ? 5 : 4); logBusy = false; return; }
-                shared.SetLogState(2);
-                logSending = true;
-                Thread t = new Thread(delegate () { logResult = SendLog(token, stem, stamp) ? 3 : 4; });
-                t.IsBackground = true;
-                t.Start();
-#else
                 // Public: keep it as <date>.csv and <date>.png, and open the folder.
                 bool ok = SaveLog(dir, stem, stamp, false);
                 shared.SetLogState(ok ? 6 : 4);
@@ -1397,7 +1304,6 @@ namespace ClipGuard
                 {
                     try { Process.Start("explorer.exe", "/select,\"" + Path.Combine(dir, stamp + ".png") + "\""); } catch (Exception) { }
                 }
-#endif
             }
             else if ((DateTime.Now - logStart).TotalSeconds > 20)
             {
@@ -1423,33 +1329,6 @@ namespace ClipGuard
             }
             catch (Exception) { return false; }
         }
-#if TEST
-        static bool SendLog(string token, string stem, string stamp)
-        {
-            try
-            {
-                if (File.Exists(stem + ".csv"))
-                    GitHub.PutFile(token, "logs/" + stamp + ".csv", File.ReadAllBytes(stem + ".csv"), "Log " + stamp + " [skip ci]");
-                if (File.Exists(stem + ".bmp"))
-                {
-                    byte[] png;
-                    using (Bitmap bmp = new Bitmap(stem + ".bmp"))
-                    using (MemoryStream ms = new MemoryStream())
-                    {
-                        bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-                        png = ms.ToArray();
-                    }
-                    GitHub.PutFile(token, "logs/" + stamp + ".png", png, "Log " + stamp + " screenshot [skip ci]");
-                }
-                return true;
-            }
-            catch (Exception ex)
-            {
-                GitHub.Note("logs", "Sending " + stamp + " failed: " + ex.Message);
-                return false;
-            }
-        }
-#endif
 
         // Take the plain arrow keys while the overlay shows; give them back after.
         void UpdatePlainArrows()
@@ -1553,9 +1432,6 @@ namespace ClipGuard
             }
 #endif
             UpdatePlainArrows();
-#if PLUS
-            KscapeTick();
-#endif
 
             if (DateTime.Now >= saveDue)
             {
@@ -1597,10 +1473,6 @@ namespace ClipGuard
 #if PLAYER
         // ---- 2.64.1: the player's ClipGuard tab and source (Media Player / Video Processor) ----
         public void SetPlayerSource(int src) { if (s.PlayerSource != src) { s.PlayerSource = src; Changed(); } }
-        // 2.74.0: the Kaleidescape, for the remote in Video Processor.
-        public bool KscapeReady() { return false; }   // 0.9.1: no Kaleidescape control in the public build
-        public int KscapeMode() { return kscape != null ? kscape.Mode : 0; }
-        public void KscapeSend(string command) { if (kscape != null) kscape.Send(command); }
         // 2.83.0: the remote's Home button: the same as F6 (ClipGuard's info banner on / off).
         public void ToggleClipGuardBanner()
         {
@@ -1697,9 +1569,6 @@ namespace ClipGuard
 #if TEST
             if (media != null) { try { media.Close(); } catch (Exception) { } }
 #endif
-#if PLUS
-            if (kscape != null) kscape.Dispose();
-#endif
             try { s.Save(iniPath); } catch (Exception) { }
             for (int id = HK_O; id <= HK_F6; id++) Native.UnregisterHotKey(Handle, id);
             shared.Retire();
@@ -1707,405 +1576,6 @@ namespace ClipGuard
             base.OnFormClosed(e);
         }
     }
-
-#if PLUS
-    // ---- ClipGuard+: Kaleidescape (2.44.0) --------------------------------------
-    // Asks the player once a second over its control protocol (TCP port 10000,
-    // "01/1/GET_PLAY_STATUS:") whether a movie is loaded: play mode 0 = nothing,
-    // 1 paused, 2 playing, 4/6 scanning. Paused and scanning count as playing, so
-    // the look-ahead does not change with every pause. "auto" finds the player on
-    // the local network (the last address found is tried first); "off" turns it off.
-    class KscapeWatch : IDisposable
-    {
-        public volatile bool Playing;
-        public volatile string FoundIP;
-        public volatile int Mode;           // 2.74.0: the last play mode (0 none, 1 paused, 2 playing, ...)
-
-        // 2.74.0 (Player): the remote controls the Kaleidescape in Video Processor. Commands
-        // go out in order on their own connection ("01/1/<COMMAND>:"), never waiting on the UI.
-        readonly Queue<string> sendQ = new Queue<string>();
-        readonly AutoResetEvent sendWake = new AutoResetEvent(false);
-        Thread sender;
-        TcpClient sendClient;
-        public bool Ready { get { return FoundIP != null || (!auto && !setting.Equals("off", StringComparison.OrdinalIgnoreCase)); } }
-
-        public void Send(string command)
-        {
-            lock (sendQ) { if (sendQ.Count < 20) sendQ.Enqueue(command); }
-            if (sender == null)
-            {
-                sender = new Thread(SendLoop);
-                sender.IsBackground = true;
-                sender.Start();
-            }
-            sendWake.Set();
-        }
-
-        void SendLoop()
-        {
-            while (true)
-            {
-                sendWake.WaitOne(5000);
-                while (true)
-                {
-                    string c;
-                    lock (sendQ) { if (sendQ.Count == 0) break; c = sendQ.Dequeue(); }
-                    string host = FoundIP ?? (auto ? null : setting);
-                    if (host == null) continue;
-                    for (int attempt = 0; attempt < 2; attempt++)
-                    {
-                        try
-                        {
-                            if (sendClient == null) sendClient = Connect(host, 1000);
-                            if (sendClient == null) break;
-                            NetworkStream st = sendClient.GetStream();
-                            byte[] b = Encoding.ASCII.GetBytes("01/1/" + c + ":\r");
-                            st.Write(b, 0, b.Length);
-                            byte[] junk = new byte[1024];
-                            while (st.DataAvailable) st.Read(junk, 0, junk.Length);   // replies are not needed
-                            break;
-                        }
-                        catch (Exception)
-                        {
-                            try { if (sendClient != null) sendClient.Close(); } catch (Exception) { }
-                            sendClient = null;
-                        }
-                    }
-                }
-            }
-        }
-        const int Port = 10000;
-        readonly string setting;
-        readonly bool auto;
-        string lastIP;
-        string ip;
-        System.Threading.Timer timer;
-        int busy;
-        int fails;
-        DateTime nextScan = DateTime.MinValue;
-        TcpClient client;
-        NetworkStream stream;
-
-        public KscapeWatch(string setting, string lastIP)
-        {
-            this.setting = setting ?? "auto";
-            auto = this.setting.Equals("auto", StringComparison.OrdinalIgnoreCase);
-            this.lastIP = string.IsNullOrEmpty(lastIP) ? null : lastIP;
-            if (this.setting.Equals("off", StringComparison.OrdinalIgnoreCase)) return;
-            timer = new System.Threading.Timer(Poll, null, 2000, 1000);
-        }
-
-        void Poll(object unused)
-        {
-            if (Interlocked.Exchange(ref busy, 1) == 1) return;
-            try
-            {
-                if (ip == null)
-                {
-                    if (!auto) ip = setting;
-                    else if (lastIP != null && Probe(lastIP)) ip = lastIP;
-                    else if (DateTime.Now >= nextScan)
-                    {
-                        nextScan = DateTime.Now.AddMinutes(2);
-                        ip = Scan();
-                    }
-                    if (ip == null) { Playing = false; KsShared.Write(""); return; }
-                    lastIP = ip;
-                    FoundIP = ip;
-                }
-                int mode = Query();
-                if (mode < 0)
-                {
-                    CloseLink();
-                    if (++fails >= 10)
-                    {
-                        Playing = false;
-                        fails = 0;
-                        if (auto) ip = null;   // find it again (its address may have changed)
-                    }
-                    return;
-                }
-                fails = 0;
-                Mode = mode;
-                Playing = mode != 0;
-            }
-            catch (Exception)
-            {
-                CloseLink();
-            }
-            finally
-            {
-                Interlocked.Exchange(ref busy, 0);
-            }
-        }
-
-        // The play mode, or -1 when the player does not answer.
-        int Query()
-        {
-            if (client == null)
-            {
-                client = Connect(ip, 1500);
-                if (client == null) return -1;
-                stream = client.GetStream();
-                stream.ReadTimeout = 1000;
-            }
-            return Ask(stream);
-        }
-
-        static int Ask(NetworkStream st)
-        {
-            string[] f = Fields(AskLine(st, "GET_PLAY_STATUS", "PLAY_STATUS"));
-            int m;
-            return f != null && f.Length > 0 && int.TryParse(f[0], out m) ? m : -1;
-        }
-
-        // 2.84.0: one request; the text after ":<key>:" on its reply line (checksum removed),
-        // or null when it does not answer in time.
-        static string AskLine(NetworkStream st, string command, string key)
-        {
-            byte[] cmd = Encoding.ASCII.GetBytes("01/1/" + command + ":\r");
-            st.Write(cmd, 0, cmd.Length);
-            StringBuilder sb = new StringBuilder();
-            byte[] buf = new byte[1024];
-            string tag = ":" + key + ":";
-            DateTime until = DateTime.Now.AddMilliseconds(1200);
-            while (DateTime.Now < until)
-            {
-                int n;
-                try { n = st.Read(buf, 0, buf.Length); }
-                catch (IOException) { return null; }
-                if (n <= 0) return null;
-                sb.Append(Encoding.UTF8.GetString(buf, 0, n));
-                string all = sb.ToString();
-                int i = all.IndexOf(tag, StringComparison.Ordinal);
-                if (i >= 0)
-                {
-                    int e = all.IndexOfAny(new[] { '\r', '\n' }, i);
-                    if (e < 0) continue;
-                    string v = all.Substring(i + tag.Length, e - i - tag.Length);
-                    int c = v.LastIndexOf(":/", StringComparison.Ordinal);   // ":/NN" checksum
-                    if (c >= 0) v = v.Substring(0, c);
-                    return v;
-                }
-                if (sb.Length > 16384) sb.Remove(0, sb.Length - 2048);
-            }
-            return null;
-        }
-
-        // Fields split on ':', with the protocol's backslash escapes undone.
-        static string[] Fields(string v)
-        {
-            if (v == null) return null;
-            List<string> l = new List<string>();
-            StringBuilder cur = new StringBuilder();
-            for (int i = 0; i < v.Length; i++)
-            {
-                char ch = v[i];
-                if (ch == '\\' && i + 1 < v.Length) { cur.Append(v[++i]); continue; }
-                if (ch == ':') { l.Add(cur.ToString()); cur.Length = 0; continue; }
-                cur.Append(ch);
-            }
-            l.Add(cur.ToString());
-            return l.ToArray();
-        }
-
-        // ---- 2.84.0: details for the top banner on Video Processor --------------------
-        string kTitle = "", kLoc = "", kColor = "", kMask = "", kTitleNum = "";
-        DateTime kNext = DateTime.MinValue;
-        string kLastRaw = "";
-
-        void Details(int mode)
-        {
-            if (stream == null) return;
-            if (mode == 0) { kTitle = ""; KsShared.Write(""); return; }
-            string ps = AskLine(stream, "GET_PLAY_STATUS", "PLAY_STATUS");
-            string[] f = Fields(ps) ?? new string[0];
-            string num = f.Length > 2 ? f[2] : "";
-            if (DateTime.Now >= kNext || num != kTitleNum)
-            {
-                kNext = DateTime.Now.AddSeconds(5);
-                kTitleNum = num;
-                string t = AskLine(stream, "GET_PLAYING_TITLE_NAME", "TITLE_NAME");
-                string loc = AskLine(stream, "GET_MOVIE_LOCATION", "MOVIE_LOCATION");
-                string col = AskLine(stream, "GET_VIDEO_COLOR", "VIDEO_COLOR");
-                string mask = AskLine(stream, "GET_SCREEN_MASK", "SCREEN_MASK");
-                string[] tf = Fields(t);
-                kTitle = tf != null && tf.Length > 0 ? Ascii(string.Join(":", tf).Trim().TrimEnd(':')) : "";
-                kLoc = LocText(Fields(loc));
-                kColor = ColorText(Fields(col));
-                kMask = MaskText(Fields(mask));
-                string raw = "PLAY_STATUS:" + ps + " | TITLE_NAME:" + t + " | MOVIE_LOCATION:" + loc + " | VIDEO_COLOR:" + col + " | SCREEN_MASK:" + mask;
-                if (raw != kLastRaw) { kLastRaw = raw; KsLog(raw); }
-            }
-            List<string> lines = new List<string>();
-            lines.Add(kTitle);
-            int len = F(f, 3), at = F(f, 4), ch = F(f, 5);
-            if (len > 0) lines.Add(Hms(at) + " of " + Hms(len));
-            string state = mode == 1 ? "Paused" : mode == 2 ? "Playing" : mode == 3 ? "Forward" : mode == 4 ? "Reverse" : "";
-            lines.Add((ch > 0 ? "Chapter " + ch.ToString(CultureInfo.InvariantCulture) + (state.Length > 0 ? " \u00B7 " : "") : "") + state);
-            if (kColor.Length > 0) lines.Add("Sends " + kColor);
-            if (kMask.Length > 0) lines.Add(kMask);
-            if (kLoc.Length > 0) lines.Add(kLoc);
-            KsShared.Write(string.Join("\n", lines.ToArray()));
-        }
-
-        static int F(string[] f, int i) { int v; return f != null && f.Length > i && int.TryParse(f[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out v) ? v : 0; }
-
-        static string Hms(int s)
-        {
-            if (s < 0) s = 0;
-            return (s / 3600).ToString(CultureInfo.InvariantCulture) + ":" + (s / 60 % 60).ToString("00", CultureInfo.InvariantCulture) + ":" + (s % 60).ToString("00", CultureInfo.InvariantCulture);
-        }
-
-        static string LocText(string[] f)
-        {
-            int v = F(f, 0);
-            return v == 3 ? "Main feature" : v == 4 ? "Intermission" : v == 5 ? "End credits" : v == 6 ? "Disc menu" : "";
-        }
-
-        static string ColorText(string[] f)
-        {
-            if (f == null || f.Length < 2) return "";
-            int eotf = F(f, 0), cs = F(f, 1), depth = F(f, 2), smp = F(f, 3);
-            List<string> p = new List<string>();
-            string e = eotf == 1 ? "SDR" : eotf == 2 ? "HDR" : eotf == 3 ? "HDR10" : "";
-            if (e.Length > 0) p.Add(e);
-            string c = cs == 2 ? "BT.601" : cs == 3 ? "BT.709" : cs == 4 ? "BT.2020" : "";
-            if (c.Length > 0) p.Add(c);
-            int bits = depth == 24 || depth == 30 || depth == 36 ? depth / 3 : (depth == 8 || depth == 10 || depth == 12 ? depth : 0);
-            string sm = smp == 1 ? "RGB" : smp == 2 ? "4:2:2" : smp == 3 ? "4:4:4" : smp == 4 ? "4:2:0" : "";
-            if (bits > 0 || sm.Length > 0) p.Add(((bits > 0 ? bits.ToString(CultureInfo.InvariantCulture) + "-bit " : "") + sm).Trim());
-            return string.Join(", ", p.ToArray());
-        }
-
-        static string MaskText(string[] f)
-        {
-            int v = F(f, 0);
-            string r = v == 1 ? "1.33" : v == 2 ? "1.66" : v == 3 ? "1.78" : v == 4 ? "1.85" : v == 5 ? "2.35" : "";
-            return r.Length > 0 ? "Image " + r + ":1" : "";
-        }
-
-        // The banner's font has ASCII and Latin-1 punctuation only: accents are dropped.
-        static string Ascii(string s)
-        {
-            string d = s.Normalize(NormalizationForm.FormD);
-            StringBuilder b = new StringBuilder();
-            foreach (char c in d)
-            {
-                if (CharUnicodeInfo.GetUnicodeCategory(c) == UnicodeCategory.NonSpacingMark) continue;
-                b.Append(c >= 32 && c < 127 ? c : (c == '\u2019' || c == '\u2018' ? '\'' : (c == '\u2013' || c == '\u2014' ? '-' : '?')));
-            }
-            return b.ToString();
-        }
-
-        static void KsLog(string line)
-        {
-            try
-            {
-                string p = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipGuard", "kscape.log");
-                FileInfo fi = new FileInfo(p);
-                if (fi.Exists && fi.Length > 200000) File.Delete(p);
-                File.AppendAllText(p, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "  " + line + "\r\n");
-            }
-            catch (Exception) { }
-        }
-
-        static TcpClient Connect(string host, int ms)
-        {
-            TcpClient c = new TcpClient();
-            try
-            {
-                IAsyncResult r = c.BeginConnect(host, Port, null, null);
-                if (!r.AsyncWaitHandle.WaitOne(ms) || !c.Connected) { c.Close(); return null; }
-                c.EndConnect(r);
-                return c;
-            }
-            catch (Exception) { c.Close(); return null; }
-        }
-
-        // True when a Kaleidescape answers at this address.
-        static bool Probe(string host)
-        {
-            TcpClient c = Connect(host, 1000);
-            if (c == null) return false;
-            try
-            {
-                NetworkStream st = c.GetStream();
-                st.ReadTimeout = 1000;
-                return Ask(st) >= 0;
-            }
-            catch (Exception) { return false; }
-            finally { c.Close(); }
-        }
-
-        // Every address on this PC's local networks (/24) with port 10000 open,
-        // then the first that answers as a Kaleidescape.
-        static string Scan()
-        {
-            List<string> hosts = new List<string>();
-            try
-            {
-                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
-                {
-                    if (ni.OperationalStatus != OperationalStatus.Up || ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-                    foreach (UnicastIPAddressInformation a in ni.GetIPProperties().UnicastAddresses)
-                    {
-                        if (a.Address.AddressFamily != AddressFamily.InterNetwork) continue;
-                        byte[] b = a.Address.GetAddressBytes();
-                        if (b[0] == 169 && b[1] == 254) continue;
-                        for (int h = 1; h < 255; h++)
-                        {
-                            if (h == b[3]) continue;
-                            string host = b[0] + "." + b[1] + "." + b[2] + "." + h;
-                            if (!hosts.Contains(host)) hosts.Add(host);
-                        }
-                    }
-                }
-            }
-            catch (Exception) { return null; }
-            List<TcpClient> clients = new List<TcpClient>();
-            List<IAsyncResult> results = new List<IAsyncResult>();
-            foreach (string h in hosts)
-            {
-                TcpClient c = new TcpClient();
-                try { results.Add(c.BeginConnect(h, Port, null, null)); clients.Add(c); }
-                catch (Exception) { c.Close(); }
-            }
-            Thread.Sleep(800);
-            List<string> open = new List<string>();
-            for (int i = 0; i < clients.Count; i++)
-            {
-                try { if (results[i].IsCompleted && clients[i].Connected) open.Add(hosts[i]); } catch (Exception) { }
-                try { clients[i].Close(); } catch (Exception) { }
-            }
-            foreach (string h in open)
-                if (Probe(h)) return h;
-            return null;
-        }
-
-        void CloseLink()
-        {
-            try { if (client != null) client.Close(); } catch (Exception) { }
-            client = null;
-            stream = null;
-        }
-
-        public void Dispose()
-        {
-            if (timer != null) timer.Dispose();
-            timer = null;
-            CloseLink();
-            KsShared.Write("");
-        }
-    }
-
-    // 2.84.0: the Kaleidescape's details for the renderer's top banner (Local\ClipGuard_Kscape).
-    static class KsShared
-    {
-        static readonly InfoShared block = new InfoShared(@"Local\ClipGuard_Kscape");
-        public static void Write(string text) { block.Write(text); }
-    }
-#endif
 
     // 2.84.0 / 2.86.0: a text block for the renderer's top banner: magic "KSC1", tick, chars,
     // UTF-16 text (lines: title, then the column). The renderer ignores it after 5 s without a tick.
@@ -2156,24 +1626,4 @@ namespace ClipGuard
         }
     }
 
-    // ---- GitHub: updates and logs -----------------------------------------------
-    // The token comes only from clipguard.ini next to ClipGuard.exe ([GitHub] Token=).
-
-    // ClipGuard Media Player public build: no GitHub or token code at all. Logs and meter
-    // readings are kept on this PC only; updates come as a new Setup from the Releases page.
-    static class GitHub
-    {
-        public static string ReadToken(string seedIni) { return ""; }
-        public static void PutFile(string token, string repoPath, byte[] data, string message) { }
-        public static void Note(string name, string line) { }
-    }
-
-    static class Updater
-    {
-        public static string Root = "";
-        public static bool Nested = false;
-        public static string[] Required = new string[0];
-        public static void DeleteOld() { }
-        public static bool Run(string appDir, string seedIni) { return false; }
-    }
 }

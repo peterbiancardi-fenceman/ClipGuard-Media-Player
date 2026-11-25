@@ -37,12 +37,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # A version that has no release yet is published as a beta (pre-release), tagged
-          # v<version> on this commit. A version already released is left as it is.
+          # A version that has no release yet is published, tagged v<version> on this commit:
+          # 0.x as a beta (pre-release), 1.0 and later as a release. A version already
+          # released is left as it is.
           $v = '${{ steps.build.outputs.version }}'
           $tag = "v$v"
           gh release view $tag 2>$null
           if ($LASTEXITCODE -eq 0) { Write-Host "$tag is already released"; exit 0 }
           $exe = Get-ChildItem _bin/setup/*.exe | Select-Object -First 1
-          gh release create $tag $exe.FullName --target '${{ github.sha }}' --prerelease --title "ClipGuard Media Player $v (beta)" --notes-file RELEASE-NOTES.md
+          if ($v.StartsWith('0.')) {
+            gh release create $tag $exe.FullName --target '${{ github.sha }}' --prerelease --title "ClipGuard Media Player $v (beta)" --notes-file RELEASE-NOTES.md
+          } else {
+            gh release create $tag $exe.FullName --target '${{ github.sha }}' --latest --title "ClipGuard Media Player $v" --notes-file RELEASE-NOTES.md
+          }
           if ($LASTEXITCODE) { throw 'release failed' }

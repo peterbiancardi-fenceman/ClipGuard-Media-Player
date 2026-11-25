@@ -1,14 +1,12 @@
-// ClipGuard Meter 1.16 (ClipGuard Test package only).
+// ClipGuard Meter 1.16.
 //
 // Measures how a projector's laser dimming behaves, with an i1Display Pro (or
 // any meter ArgyllCMS's spotread can drive) pointed at the centre of the
 // screen. It draws its own test patterns full screen and reads the meter
-// between them; results go to the private repo (meter/<time>.csv) the same
-// way ClipGuard Test sends logs, using the token in clipguard.ini next to
-// ClipGuard.exe. Nothing to paste.
+// between them; results are saved as meter_<time>.csv on this PC.
 //
-// Built from this file plus ClipGuard.cs (/define:TEST /main:ClipGuard.MeterProgram)
-// so it shares the ini and GitHub code. C# 5.
+// Built from this file plus ClipGuard.cs (/main:ClipGuard.MeterProgram) so it
+// shares the ini code. C# 5.
 //
 // Keys:  C = check the meter (Argyll found, meters on USB, one reading)
 //        A = aim the meter (target + live reading; Enter when done)
@@ -400,8 +398,8 @@ namespace ClipGuard
                 + "   Run T, S and G once with DBLE Off and once on High.\n"
                 + "   L = auto-cal: builds a 3D LUT for the Titan or the Valerion (needs titan.ccss /\n"
                 + "   valerion.ccss next to ClipGuardMeter.exe; laser dimming off; about 15 minutes).\n\n"
-                + "Esc stops (what was measured is still sent).  M = next monitor.\n\n"
-                + "Results go to Claude automatically when a run finishes.";
+                + "Esc stops (what was measured is still saved).  M = next monitor.\n\n"
+                + "Results are saved as meter_<date>.csv when a run finishes.";
         }
 
         void PlaceOnScreen()
@@ -563,7 +561,7 @@ namespace ClipGuard
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             // While a run is going, closing only stops it (what was measured is
-            // still sent); the window closes from the finished screen.
+            // still saved); the window closes from the finished screen.
             if (worker != null && worker.IsAlive)
             {
                 cancel = true;
@@ -999,7 +997,6 @@ namespace ClipGuard
             List<string> report = new List<string>();
             Spotread sp = new Spotread(clock);
             reader = sp;
-            bool sent = false;
             try
             {
                 Status("Starting the meter...");
@@ -1153,7 +1150,7 @@ namespace ClipGuard
                         }
                 report.Add("Transitions run complete.");
             }
-            catch (OperationCanceledException) { if (cancel) report.Add("Stopped before the end; what was measured is sent."); }
+            catch (OperationCanceledException) { if (cancel) report.Add("Stopped before the end; what was measured is saved."); }
             catch (Exception ex) { report.Add("Error: " + ex.Message); }
             finally
             {
@@ -1168,19 +1165,7 @@ namespace ClipGuard
                 csv.Append("# report: ").Append(summary.Replace("\n", " | ")).Append("\n");
                 string local = Path.Combine(appDir, "meter_" + stamp + ".csv");
                 try { File.WriteAllText(local, csv.ToString()); } catch (Exception) { }
-                Status("Sending to Claude...");
-                try
-                {
-                    string token = GitHub.ReadToken(seedIni);
-                    if (token.Length == 0) summary += "\n\nNot sent: no token in clipguard.ini. Saved as " + local;
-                    else
-                    {
-                        GitHub.PutFile(token, "meter/" + stamp + ".csv", Encoding.UTF8.GetBytes(csv.ToString()), "Meter " + stamp + " [skip ci]");
-                        sent = true;
-                        summary += "\n\nSent to Claude (meter " + stamp + ").";
-                    }
-                }
-                catch (Exception ex) { summary += "\n\nNot sent (" + ex.Message + "). Saved as " + local; }
+                summary += "\n\nSaved as " + local;
             }
             SetIdle((mode == 0 ? "Test run" : (mode == 1 ? "Full run" : (mode == 2 ? "Transitions run" : (mode == 3 ? "Clip test" : (mode == 4 ? "Frame test" : (mode == 5 ? "Histogram test" : (mode == 7 ? "Fall test" : (mode == 8 ? "Colour test" : "Threshold map")))))))) + " finished.\n\n" + summary + "\n\nT = test run   S = full run   R = transitions   G = clip test   F = frame test   H = histogram test   B = threshold map   D = fall test   K = colour test   Esc = quit");
         }

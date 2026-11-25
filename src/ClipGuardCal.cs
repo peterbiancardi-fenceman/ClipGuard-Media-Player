@@ -488,14 +488,6 @@ namespace ClipGuard
             catch (OperationCanceledException) { r.Add("Stopped."); }
             catch (Exception ex) { r.Add("Error: " + ex.Message); }
             finally { Show(new MScene { Id = "idle", Bg = 16, Patch = -1 }); }
-            try
-            {
-                string token = GitHub.ReadToken(seedIni);
-                string stamp = DateTime.Now.ToString("yyyy-MM-dd_HHmmss", CultureInfo.InvariantCulture);
-                csv.Append("# report: ").Append(string.Join(" | ", r.ToArray())).Append("\n");
-                if (token.Length > 0) GitHub.PutFile(token, "meter/noise_" + stamp + ".csv", Encoding.UTF8.GetBytes(csv.ToString()), "Meter noise check " + stamp + " [skip ci]");
-            }
-            catch (Exception) { }
             calSetup = true;
             SetIdle("NOISE CHECK (50% grey, 10 readings each; smaller +/- = steadier)\n\n" + string.Join("\n", r.ToArray()) + "\n\n" + CalSetupText());
         }
@@ -1054,27 +1046,8 @@ namespace ClipGuard
             }
 
             if (CalApp.On) report.Add("Esc closes calibration and returns to the player.");
-
-            // send to Claude: readings, the .ti3 and the report (not the .cube: it is large)
             string summary = string.Join("\n", report.ToArray());
-            if (csv != null && csv.Length > 0)
-            {
-                Status("Sending to Claude...");
-                try
-                {
-                    string token = GitHub.ReadToken(seedIni);
-                    if (token.Length > 0)
-                    {
-                        string dir = "meter/cal_" + stamp + "/";
-                        csv.Append("# report: ").Append(summary.Replace("\n", " | ")).Append("\n");
-                        GitHub.PutFile(token, dir + "readings.csv", Encoding.UTF8.GetBytes(csv.ToString()), "Meter auto-cal " + stamp + " [skip ci]");
-                        if (ti3Text.Length > 0) GitHub.PutFile(token, dir + "display.ti3", Encoding.UTF8.GetBytes(ti3Text), "Meter auto-cal " + stamp + " ti3 [skip ci]");
-                        if (done && File.Exists(pdfPath)) GitHub.PutFile(token, dir + "report.pdf", File.ReadAllBytes(pdfPath), "Meter auto-cal " + stamp + " report [skip ci]");
-                        summary += "\n\nSent to Claude (auto-cal " + stamp + ").";
-                    }
-                }
-                catch (Exception ex) { summary += "\n\nNot sent (" + ex.Message + ")."; }
-            }
+
             // 2.97.1: from the player, a stopped or failed run goes straight back to the setup
             if (CalApp.On && !done) { calSetup = true; calRow = 0; SetIdle(summary + "\n\n" + CalSetupText()); return; }
             SetIdle("Auto-cal finished.\n\n" + summary + "\n\nL = auto-cal again   Esc = quit");

@@ -1,11 +1,8 @@
-# ClipGuard Media Player (beta)
+# ClipGuard Media Player
 
 A home theater player for Windows, made for projectors with dynamic laser dimming.
 It plays films and TV shows from your Plex server, and it can show a live HDMI source
 through a capture card, with the same picture processing.
-
-> **Beta.** This is a public beta. Expect rough edges, and please report problems
-> (see [Reporting problems](#reporting-problems)).
 
 ## What it does
 

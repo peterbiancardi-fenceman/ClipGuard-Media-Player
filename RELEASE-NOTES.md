@@ -1,15 +1,10 @@
-**Public beta.** Download **ClipGuard Media Player Setup 0.9.7.exe** below and run it (no administrator rights needed). It installs over 0.9.6 and keeps your settings. See the [README](https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player#readme) for requirements, setup, keys, the remote and the mouse.
+**ClipGuard Media Player 1.0.0.** Download **ClipGuard Media Player Setup 1.0.0.exe** below and run it (no administrator rights needed). It installs over the 0.9 betas and keeps your settings. See the [README](https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player#readme) for requirements, setup, keys, the remote and the mouse.
 
-**New in 0.9.7**
+**New in 1.0.0**
 
-- **Lens, Auto:** a film that carries its own active-area metadata is decided at once and exactly (no 4 second wait); other films are still read from the picture.
-- **Lens, scope is held:** once a film shows a scope letterbox it stays scope for the rest of the film; taller IMAX scenes are cropped top and bottom to the screen's shape.
-- **Lens, 3840 x 1920 encodes** are read for a scope letterbox too.
-- **Lens on 2.00 / 2.10 films** (taller but narrower): Standard now uses RAVU-Zoom-AR for the height and SSimDownscaler for the width; Lightweight uses Lanczos for both.
-- **Neural 2x first** no longer switches itself off after a pause, a frame step or a seek; choosing it again turns it back on for the film.
-- **L** while watching (paused too) cycles Lens upscale: Lightweight, Standard, Neural 2x first.
-- **FSRCNNX** keeps the source's brightness exactly (it drifted very slightly darker).
-- **Banner (F6):** the scaling path says width / height, and "none (1:1)" when nothing is scaled.
+- **Themes:** the info banner (F6), the in-film settings panel and the ClipBee bar now follow the theme chosen in Settings > Theme, and change with it straight away. Warning chips and warning lines keep their own colour in every theme so they still stand out.
+- **F11 log:** saves the log and opens its folder, with no upload code left in the player or the meter.
+- **Clean-up:** code the public player never used was removed (network search for other devices, unused settings and fields); Plex is told the player's real version.
 
 Video Processor needs an unencrypted HDMI signal.
 

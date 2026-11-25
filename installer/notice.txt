@@ -1,4 +1,4 @@
-ClipGuard Media Player (beta)
+ClipGuard Media Player
 
 Please read before installing.
 
@@ -9,8 +9,8 @@ save the video it shows; it only displays it. You are responsible for using it
 with sources and content you are permitted to use, and in line with the laws
 where you live and the terms of your devices and services.
 
-BETA
-This is a beta. Report problems as issues on
+PROBLEMS
+Report problems as issues on
 https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player/issues
 
 PRIVACY

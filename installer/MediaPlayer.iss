@@ -16,7 +16,7 @@
 AppId={{3B7E9D52-6A41-4C8F-B2E0-5F19C7A4D836}
 AppName=ClipGuard Media Player
 AppVersion={#AppVer}
-AppVerName=ClipGuard Media Player {#AppVer} (beta)
+AppVerName=ClipGuard Media Player {#AppVer}
 AppPublisher=ClipGuard Media Player
 AppPublisherURL=https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player
 AppSupportURL=https://github.com/peterbiancardi-fenceman/ClipGuard-Media-Player/issues
