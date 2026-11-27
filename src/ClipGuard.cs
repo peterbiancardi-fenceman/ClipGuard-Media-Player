@@ -613,11 +613,7 @@ namespace ClipGuard
             view.Write(ODither, s.Dither);
             view.Write(OProjector, s.Projector);
             view.Write(OLutOff, s.LutOff ? 1 : 0);
-            int lut = s.Lut;
-#if PLAYER
-            if (ControlForm.PlayerMode) lut = 0;   // 2.66.0: the player uses its Calibration LUT (Picture), not ClipGuard's
-#endif
-            view.Write(OLut, lut);
+            view.Write(OLut, 0);   // 1.1.0: ClipGuard's LUT row is gone; the player's Calibration LUT is used
             view.Write(OSource, s.Source);
             view.Write(OInfo, s.Info ? 1 : 0);
             view.Write(OGrid, s.Grid);
@@ -790,10 +786,12 @@ namespace ClipGuard
         // Menu rows: ClipGuard (not +) has no Upscaler row. The last row is "Restart & update".
         // 2.63.1: the Test-only Source row is gone (the ClipGuard+ Player opens the Media Player).
         public const int RowUpscaler = 15;
-        public static int Rows { get { return 22 - (Edition.Plus ? 0 : 1); } }
+        public const int RowLut = 18;   // 1.1.0: the LUT row is gone
+        public static int Rows { get { return 22 - 1 - (Edition.Plus ? 0 : 1); } }
         public static int RowOf(int shown)
         {
             if (!Edition.Plus && shown >= RowUpscaler) shown++;
+            if (shown >= RowLut) shown++;
             return shown;
         }
 
@@ -1394,11 +1392,6 @@ namespace ClipGuard
                         s.Projector = order[(i + (dir > 0 ? 1 : order.Length - 1)) % order.Length];
                         break;
                     }
-                case 18:
-#if PLAYER
-                    if (PlayerMode) break;   // 2.66.0: the player's LUT is in Picture > Calibration LUT
-#endif
-                    s.Lut = (s.Lut + (dir > 0 ? 1 : 2)) % 3; break;   // 2.50.0: None, Titan, Valerion
                 case 19: s.View = (s.View + (dir > 0 ? 1 : 3)) % 4; break;
                 case 20: s.Pinned = !s.Pinned; break;
             }
@@ -1503,7 +1496,6 @@ namespace ClipGuard
             {
                 case 0: return s.Enabled ? "On" : "Off";
                 case 17: return s.Projector == 1 ? "Titan Noir Max DBLE High (Predictive)" : (s.Projector == 3 ? "Titan Noir Max DBLE Low (Predictive)" : "Universal (Reactive)");
-                case 18: return s.Lut == 1 ? "Titan" : (s.Lut == 2 ? "Valerion" : "None");
                 case 1: return s.Strength.ToString("0.00", c);
                 case 2: return s.FixShape == 1 ? "Anchor" : "Normal";
                 case 3: return s.TriggerPct.ToString("0.0", c) + " %";

@@ -24,7 +24,7 @@ namespace ClipGuard
     {
 #if STANDALONE && PUBLIC
         const string Title = "ClipGuard Media Player";
-        public const string MediaPlayerVersion = "1.0.0";   // the public release's own numbering
+        public const string MediaPlayerVersion = "1.1.0";   // the public release's own numbering
 #elif STANDALONE
         const string Title = "ClipGuard Media Player";
         public const string MediaPlayerVersion = "2.95.1";

@@ -506,6 +506,68 @@ namespace ClipGuard
         }
     }
 
+    // 1.1.0: the graphics card's temperature and fan speed for the Info card, read every
+    // 2 s on a timer thread through NVIDIA's management library (nvml.dll, installed with the
+    // driver). Read-only: nothing here changes the card. No NVIDIA card or no nvml.dll: no row.
+    static class GpuTemp
+    {
+        [DllImport("nvml.dll", EntryPoint = "nvmlInit_v2")] static extern int nvmlInit();
+        [DllImport("nvml.dll", EntryPoint = "nvmlDeviceGetHandleByIndex_v2")] static extern int nvmlDeviceGetHandleByIndex(uint index, out IntPtr device);
+        [DllImport("nvml.dll")] static extern int nvmlDeviceGetTemperature(IntPtr device, int sensor, out uint temp);
+        [DllImport("nvml.dll")] static extern int nvmlDeviceGetFanSpeed(IntPtr device, out uint speed);
+
+        static System.Threading.Timer timer;
+        static IntPtr dev = IntPtr.Zero;
+        static volatile int state;                 // 0 not started, 1 running, 2 unavailable
+        static volatile int tempC = -1, fanPct = -1;
+        static readonly object gate = new object();
+
+        static void Poll(object o)
+        {
+            lock (gate) PollLocked();
+        }
+
+        static void PollLocked()
+        {
+            if (state == 2) return;
+            try
+            {
+                if (dev == IntPtr.Zero)
+                {
+                    if (nvmlInit() != 0 || nvmlDeviceGetHandleByIndex(0, out dev) != 0 || dev == IntPtr.Zero) { dev = IntPtr.Zero; Stop(); return; }
+                }
+                uint t, f;
+                tempC = nvmlDeviceGetTemperature(dev, 0, out t) == 0 ? (int)t : -1;   // 0 = NVML_TEMPERATURE_GPU
+                fanPct = nvmlDeviceGetFanSpeed(dev, out f) == 0 ? (int)f : -1;
+            }
+            catch (Exception) { Stop(); }
+        }
+
+        static void Stop()
+        {
+            state = 2; tempC = -1; fanPct = -1;
+            if (timer != null) { timer.Dispose(); timer = null; }   // called with gate held
+        }
+
+        // 1.1.0: a fresh reading now (for the F11 log), whatever the Info card has done.
+        public static string ReadNow()
+        {
+            lock (gate) PollLocked();
+            return Text();
+        }
+
+        // "62 °C, fan 35%", or "" when there is nothing to show.
+        public static string Text()
+        {
+            if (state == 0)
+                lock (gate)
+                    if (state == 0) { state = 1; timer = new System.Threading.Timer(Poll, null, 0, 2000); }
+            int t = tempC, f = fanPct;
+            if (t < 0) return "";
+            return t.ToString(CultureInfo.InvariantCulture) + " \u00B0C" + (f >= 0 ? ", fan " + f.ToString(CultureInfo.InvariantCulture) + "%" : "");
+        }
+    }
+
     sealed class MediaPlayer : Form
     {
         // ---- what the host (ClipGuard's control form) gives us ----------------------
@@ -680,6 +742,7 @@ namespace ClipGuard
 
             int th;
             ApplyTheme(int.TryParse(Ini("Theme", "0"), NumberStyles.Integer, CultureInfo.InvariantCulture, out th) ? th : 0);   // 2.75.0
+            ApplyLowLatency();   // 1.1.0
             BackColor = Bg;
             Plex.ClientId = Ini("PlexClientId", "");
             if (Plex.ClientId.Length < 8) { Plex.ClientId = Guid.NewGuid().ToString(); SetIni("PlexClientId", Plex.ClientId); }
@@ -2339,6 +2402,21 @@ namespace ClipGuard
             return setIdx >= 0 && setIdx < r.Length && r[setIdx].StartsWith("About\t", StringComparison.Ordinal);
         }
 
+        // 1.1.0: Low latency (Video Processor), on unless turned off: the capture filter stamps each
+        // frame with the playback clock's time when it arrived (plus two thirds of a frame), so it
+        // is shown within a refresh instead of on a schedule set at the start. No frame is dropped.
+        // Engine: CLIPGUARD_LOW_LATENCY=1, read for every frame. ini [MediaPlayer] LowLatency.
+        bool LowLatency() { return Ini("LowLatency", "1") == "1"; }
+        void ApplyLowLatency()
+        {
+            try { Environment.SetEnvironmentVariable("CLIPGUARD_LOW_LATENCY", LowLatency() ? "1" : null); } catch (Exception) { }
+        }
+        bool IsLowLatencyRow()
+        {
+            string[] r = SettingsRows();
+            return setIdx >= 0 && setIdx < r.Length && r[setIdx].StartsWith("Low latency\t", StringComparison.Ordinal);
+        }
+
 #if PLAYER
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
         class MemStatus
@@ -2601,6 +2679,7 @@ namespace ClipGuard
                 "Start with Windows\t" + (StartWithWindows() ? "On" : "Off") + "   (opens the player when you sign in to Windows; Left / Right)",
                 "Theme\t" + ThemeNames[themeIdx] + "   (Left / Right)",
                 "Menu sounds\t" + new[] { "Off", "Soft", "Normal" }[MenuSoundLevel()] + "   (Left / Right)"
+                , "Low latency\t" + (LowLatency() ? "On" : "Off") + "   (Video Processor, for lip sync; Left / Right)"   // 1.1.0
                 , "About\tVersion, build and this PC   (Enter)"   // 2.89.1
                 };
 #else
@@ -2750,6 +2829,11 @@ namespace ClipGuard
             if (k == Keys.Up) { if (setIdx == 0) navFocus = true; else setIdx--; }
             else if (k == Keys.Down) setIdx = Math.Min(n - 1, setIdx + 1);
             else if (k == Keys.Enter && IsAboutRow()) AboutOpen();   // 2.89.1
+            else if ((k == Keys.Left || k == Keys.Right) && IsLowLatencyRow())
+            {
+                SetIni("LowLatency", LowLatency() ? "0" : "1");   // 1.1.0
+                ApplyLowLatency();
+            }
             else if ((k == Keys.Left || k == Keys.Right) && SetRow() == 0)
             {
                 unpluggedDelay = ClampDelay(unpluggedDelay + (k == Keys.Right ? 5 : -5));
@@ -3310,6 +3394,8 @@ namespace ClipGuard
             r.Add(new[] { "Projector", ProjectorText() });
             int la = host.LookAheadFrames();
             int ms = sNum > 0 && sDen > 0 ? (int)Math.Round(la * 1000.0 * sDen / sNum) : 0;
+            string gt = GpuTemp.Text();
+            if (gt.Length > 0) r.Add(new[] { "GPU", gt });   // 1.1.0
             r.Add(new[] { "Look-ahead", la <= 0 ? "Off" : (la >= 12 ? "High Performance" : la.ToString(CultureInfo.InvariantCulture) + " frames" + (ms > 0 ? " (" + ms.ToString(CultureInfo.InvariantCulture) + " ms)" : "")) });
             return r.ToArray();
         }
@@ -7456,7 +7542,8 @@ namespace ClipGuard
                 { int ii = i; Hit(r, delegate { navFocus = false; setIdx = ii; }); }   // 0.9.2: mouse
                 if (!navFocus && i == setIdx) Focus(g, r);
             }
-            string help = IsAboutRow() ? "The player's version and build, this PC and its connections. Enter shows them; Copy puts them on the clipboard for a GitHub issue." : SetRow() == 0 ? HelpDelay() : SetRow() == 2
+            string help = IsLowLatencyRow() ? "Video Processor shows each captured frame as soon as it is ready instead of on a schedule set when the capture starts, so the picture is less behind the sound (about 35 ms in the PC instead of about 150). No frame is dropped. The banner's Latency line shows the time. Off: as before. Works at once (the picture may pause for a moment when it changes)."
+                : IsAboutRow() ? "The player's version and build, this PC and its connections. Enter shows them; Copy puts them on the clipboard for a GitHub issue." : SetRow() == 0 ? HelpDelay() : SetRow() == 2
                 ? "Plays a flash with a beep. Left / Right moves the sound 10 ms; Enter keeps it, Esc cancels. Do it once with look-ahead Off (F7 menu)."
                 : (SetRow() == 3 ? "All servers shows the movies of every server together; or choose one."
                 : (SetRow() == 5 ? "Asks for each button in turn (arrows, OK, Back, Play/Pause, Stop, chapters, skip, Menu) and stores what your remote sends. Wait 8 s to skip a button it doesn't have."
